@@ -41,10 +41,19 @@ A **near** fully functional [Deskflow (deskflow.org)](https://deskflow.org) clie
 
 ## Installation
 
+### F-Droid
+
+[<img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png"
+     alt="Get it on F-Droid"
+     height="80">](https://f-droid.org/packages/org.tfv.deskflow/)
 
 ### Google Play
 
 Coming soon
+
+### Github
+
+Download the latest APK from the [Releases Section](https://github.com/jglanz/deskflow-android/releases/latest).
 
 ### Build manually
 
