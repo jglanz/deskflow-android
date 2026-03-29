@@ -43,6 +43,8 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.View
@@ -149,11 +151,13 @@ class GlobalInputService : AccessibilityService() {
     object : GestureResultCallback() {
       override fun onCompleted(gestureDescription: GestureDescription) {
         super.onCompleted(gestureDescription)
+        log.trace { "Gesture completed successfully" }
         globalInputPending = false
       }
 
       override fun onCancelled(gestureDescription: GestureDescription) {
         super.onCancelled(gestureDescription)
+        log.warn { "Gesture cancelled" }
         globalInputPending = false
       }
     }
@@ -235,10 +239,19 @@ class GlobalInputService : AccessibilityService() {
       .notify(NOTIF_IME_NOT_SETUP_ID, notification)
   }
 
+  private val currentInputMethodInfoSafe: InputMethodInfo?
+    get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+      imeManager.currentInputMethodInfo
+    } else {
+      val currentImeId = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+      imeManager.enabledInputMethodList.find { it.id == currentImeId }
+    }
+
   private fun isDeskflowKeyboardActive(
-    imeInfo: InputMethodInfo? = imeManager.currentInputMethodInfo
+    imeInfo: InputMethodInfo? = null
   ): Boolean {
-    return imeInfo?.let { current -> deskflowImeInfo?.id == current.id }
+    val info = imeInfo ?: currentInputMethodInfoSafe
+    return info?.let { current -> deskflowImeInfo?.id == current.id }
       ?: false
   }
 
@@ -257,7 +270,7 @@ class GlobalInputService : AccessibilityService() {
 
     keyboardWasOpen.store(true)
 
-    val imeInfo = imeManager.currentInputMethodInfo
+    val imeInfo = currentInputMethodInfoSafe
     if (imeInfo != null) {
       log.debug { "Current IME: ${imeInfo.packageName}" }
       when {
@@ -335,6 +348,7 @@ class GlobalInputService : AccessibilityService() {
 
     serviceClient =
       ConnectionServiceClient(this) { event ->
+        log.trace { "Received event from client bridge: ${event::class.simpleName}" }
         globalInputHandler.post {
           try {
             when (event) {
@@ -474,7 +488,8 @@ class GlobalInputService : AccessibilityService() {
       GestureDescription.Builder()
         .addStroke(StrokeDescription(path, 0, 100))
         .build()
-    dispatchGesture(gesture, gestureResultCallback, globalInputHandler)
+    val result = dispatchGesture(gesture, gestureResultCallback, globalInputHandler)
+    log.debug { "dispatchGesture result: $result (Service enabled: ${isDeskflowImeEnabled})" }
   }
 
   /**
@@ -486,9 +501,10 @@ class GlobalInputService : AccessibilityService() {
     if (!mousePointerVisible) return
 
     val screenSize = getScreenSize()
-    log.debug {
-      "Cursor move to [${x}, ${y}] with size(${screenSize.px.width},${screenSize.px.height})"
+    if (x < 0 || y < 0 || x > screenSize.px.width || y > screenSize.px.height) {
+        log.warn { "Cursor coordinates OUT OF BOUNDS: [$x, $y] on screen ${screenSize.px.width}x${screenSize.px.height}" }
     }
+
     mousePointerLayout.x = x
     mousePointerLayout.y = y
 

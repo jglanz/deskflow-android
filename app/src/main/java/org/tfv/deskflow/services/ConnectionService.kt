@@ -107,7 +107,12 @@ class ConnectionService : Service() {
 
       override fun setClipboardData(bundle: Bundle): Result {
         return catch({
-          val clipboardData = bundle.getSerializable("clipboardData",ClipboardData::class.java)
+          val clipboardData = if (android.os.Build.VERSION_CODES.TIRAMISU <= android.os.Build.VERSION.SDK_INT) {
+            bundle.getSerializable("clipboardData", ClipboardData::class.java)
+          } else {
+            @Suppress("DEPRECATION")
+            bundle.getSerializable("clipboardData") as? ClipboardData
+          }
           require(clipboardData != null) {
             "clipboardData was not valid in clipboard data bundle"
           }

@@ -137,30 +137,28 @@ class ConnectionServiceClient(
         require(bundle.containsKey("message") && clazzName != null) {
           "Bundle must contain a 'message' parameter & type cannot be null ($clazzName)"
         }
-        val message = when (clazzName) {
-          LogRecordEvent::class.java.name -> {
-            val logRecord = bundle.getSerializable("message", LogRecordEvent::class.java)!!
-            addLogRecord(logRecord)
+        val message = try {
+            val messageClass = Class.forName(clazzName).asSubclass(java.io.Serializable::class.java)
+            if (clazzName == LogRecordEvent::class.java.name) {
+                val logRecord = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    bundle.getSerializable("message", LogRecordEvent::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    bundle.getSerializable("message") as? LogRecordEvent
+                }
+                logRecord?.let { addLogRecord(it) }
+                return
+            }
 
-            return
-          }
-
-          ScreenEvent.SetClipboard::class.java.name -> {
-            bundle.getSerializable("message", ScreenEvent.SetClipboard::class.java)
-          }
-
-          KeyboardEvent::class.java.name -> {
-            bundle.getSerializable("message", KeyboardEvent::class.java)
-          }
-
-          MouseEvent::class.java.name -> {
-            bundle.getSerializable("message", MouseEvent::class.java)
-          }
-
-          else -> {
-            log.warn { "$clazzName not supported yet" }
-            return
-          }
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                bundle.getSerializable("message", messageClass) as? ClientEvent
+            } else {
+                @Suppress("DEPRECATION")
+                bundle.getSerializable("message") as? ClientEvent
+            }
+        } catch (e: Exception) {
+            log.error(e) { "Failed to deserialize event class: $clazzName" }
+            null
         }
 
         require(message != null) {
