@@ -57,11 +57,12 @@ val (projectVersionName, projectVersionCode) = readVersionProperties(project)
 android {
   namespace = "org.tfv.deskflow"
   buildToolsVersion = "36.0.0"
-  compileSdk = 36
+  compileSdk = 35
 
   defaultConfig {
     applicationId = "org.tfv.deskflow"
-    minSdk = 34
+    minSdk = 30
+    targetSdk = 34
 
     versionCode = projectVersionCode
     versionName = projectVersionName

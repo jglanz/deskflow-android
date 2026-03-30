@@ -83,6 +83,7 @@ import org.tfv.deskflow.ui.components.currentDeviceConfig
 import org.tfv.deskflow.ui.components.preview.PreviewAppState
 import org.tfv.deskflow.ui.theme.DeskflowTheme
 import org.tfv.deskflow.ui.theme.LocalDeskflowExtendedColorScheme
+import android.os.Build
 
 private val log = KLoggingManager.logger("RootScreen")
 
@@ -151,9 +152,17 @@ fun RootScreen(appState: IAppState) {
             rememberPermissionState(
               android.Manifest.permission.POST_NOTIFICATIONS
             )
+
+            // 1. Defina qual permissão pedir com base na versão do Android
+          val permissionToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+              android.Manifest.permission.NEARBY_WIFI_DEVICES
+          } else {
+              // Para Android 11 (API 30) e 12, usamos Localização
+              android.Manifest.permission.ACCESS_FINE_LOCATION
+          }
           val nearbyDevicesPermissionState =
             rememberPermissionState(
-              android.Manifest.permission.NEARBY_WIFI_DEVICES
+              permissionToRequest
             )
 
           if (!canDrawOverlays) {
