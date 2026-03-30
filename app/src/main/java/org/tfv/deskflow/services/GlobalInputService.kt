@@ -469,6 +469,56 @@ class GlobalInputService : AccessibilityService() {
       nearestNodeToMouse.performAction(AccessibilityNodeInfo.ACTION_CLICK)
     }
   }
+  private var activeStroke: GestureDescription.StrokeDescription? = null
+  private fun clickGestureDown(
+    x: Float = mousePointerLayout.x.toFloat(),
+    y: Float = mousePointerLayout.y.toFloat(),
+  ){
+    val path = Path().apply { moveTo(x, y) }
+    
+    // Usamos um tempo curto (ex: 100ms) para o primeiro toque
+    activeStroke = GestureDescription.StrokeDescription(path, 0, 100, true)
+    
+    val gesture = GestureDescription.Builder()
+        .addStroke(activeStroke!!)
+        .build()
+
+    // O segredo: Não podemos enviar o próximo gesto ATÉ que este seja aceito
+    dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
+        override fun onCompleted(gestureDescription: GestureDescription?) {
+            log.debug { "Down Iniciado com sucesso" }
+        }
+        override fun onCancelled(gestureDescription: GestureDescription?) {
+            log.warn { "Down Cancelado - verifique se há outro gesto rodando" }
+            activeStroke = null 
+        }
+    }, globalInputHandler)
+  }
+
+  private fun clickGestureUp(
+    x: Float = mousePointerLayout.x.toFloat(),
+    y: Float = mousePointerLayout.y.toFloat(),
+  ){
+    activeStroke?.let { stroke ->
+        val finalPath = Path().apply {
+            moveTo(mousePointerLayout.x.toFloat(), mousePointerLayout.y.toFloat())
+            lineTo(x, y)
+        }
+
+        // willContinue: false encerra o gesto no Android
+        activeStroke = stroke.continueStroke(finalPath, 0, 100, false)
+
+        val gesture = GestureDescription.Builder()
+            .addStroke(activeStroke!!)
+            .build()
+
+        val result = dispatchGesture(gesture, gestureResultCallback, globalInputHandler)
+
+        log.debug { "dispatchGesture result: $result (Service enabled: ${isDeskflowImeEnabled})" }
+        
+        activeStroke = null // Reseta para o próximo clique
+    }
+  }
 
   /**
    * Perform a click gesture at the current mouse pointer position. This is used
@@ -482,6 +532,7 @@ class GlobalInputService : AccessibilityService() {
   ) {
 
     log.debug { "Click gesture at [$x, $y]" }
+
 
     val path = Path().apply { moveTo(x, y) }
     val gesture =
@@ -498,16 +549,37 @@ class GlobalInputService : AccessibilityService() {
    * > Example: Used for mouse movement in the global input service.
    */
   private fun moveMousePointer(x: Int, y: Int) {
-    if (!mousePointerVisible) return
+    if (!mousePointerVisible || globalInputPending) return
 
-    val screenSize = getScreenSize()
-    if (x < 0 || y < 0 || x > screenSize.px.width || y > screenSize.px.height) {
-        log.warn { "Cursor coordinates OUT OF BOUNDS: [$x, $y] on screen ${screenSize.px.width}x${screenSize.px.height}" }
+    val startX = mousePointerLayout.x.toFloat()
+    val startY = mousePointerLayout.y.toFloat()
+    
+    activeStroke?.let { stroke ->
+        val nextPath = Path().apply {
+            moveTo(startX, startY)
+            lineTo(x.toFloat(), y.toFloat())
+        }
+
+        try {
+            // Reduzimos para 20ms ou 32ms para eliminar o lag visual
+            activeStroke = stroke.continueStroke(nextPath, 0, 20, true)
+            
+            val gesture = GestureDescription.Builder()
+                .addStroke(activeStroke!!)
+                .build()
+
+            globalInputPending = true
+            dispatchGesture(gesture, gestureResultCallback, globalInputHandler)
+            
+        } catch (e: Exception) {
+            activeStroke = null
+            globalInputPending = false
+        }
     }
 
+    // O ponteiro visual sempre atualiza, mas o gesto espera o callback
     mousePointerLayout.x = x
     mousePointerLayout.y = y
-
     windowManager.updateViewLayout(mousePointerView, mousePointerLayout)
   }
 
@@ -530,16 +602,27 @@ class GlobalInputService : AccessibilityService() {
       }
 
       MouseEvent.Type.Down -> {
-        log.debug { "Down [$event]" }
+        log.info { "MouseEvent.Down detected at [${mousePointerLayout.x}, ${mousePointerLayout.y}]" }
+        clickGestureDown(mousePointerLayout.x.toFloat(), mousePointerLayout.y.toFloat())
       }
 
       MouseEvent.Type.Up -> {
-        log.debug { "Up [$event]" }
-        clickGesture()
+        log.info { "MouseEvent.Up detected at [${mousePointerLayout.x}, ${mousePointerLayout.y}]" }
+        if(
+          // 50px tolerance
+          abs(mousePointerLayout.x - event.x) < 5 &&
+          abs(mousePointerLayout.y - event.y) < 5
+        ) {
+          clickGesture(mousePointerLayout.x.toFloat(), mousePointerLayout.y.toFloat())
+        }
+        else  {
+          clickGestureUp(mousePointerLayout.x.toFloat(), mousePointerLayout.y.toFloat())
+        }
       }
 
       MouseEvent.Type.Wheel -> {
-        if (abs(event.y) < 240) return
+        
+        if (abs(event.y) < 100) return
         log.debug { "Wheel [${event.x}, ${event.y}]" }
         swipe(up = event.y > 0)
       }
@@ -721,7 +804,7 @@ class GlobalInputService : AccessibilityService() {
         lineTo(middleX, endY)
       }
 
-    val stroke = StrokeDescription(path, 0, 500)
+    val stroke = StrokeDescription(path, 0, 100)
 
     val gesture = GestureDescription.Builder().addStroke(stroke).build()
 

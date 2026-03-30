@@ -1,0 +1,31 @@
+#!/bin/bash
+PACKAGE_NAME="org.tfv.deskflow"
+MAIN_ACTIVITY=".ui.activities.RootActivity"
+
+echo "Checking for connected devices..."
+if ! adb devices | grep -q $'\tdevice$'; then
+    echo "[ERROR] No devices connected. Please connect a device or start an emulator."
+    exit 1
+fi
+
+echo "[1/4] Cleaning and Building APK..."
+./gradlew clean assembleDebug
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Build failed."
+    exit 1
+fi
+
+echo "[2/4] Installing APK..."
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Installation failed."
+    exit 1
+fi
+
+echo "[3/4] Starting Application..."
+adb shell am start -n "$PACKAGE_NAME/$MAIN_ACTIVITY"
+
+echo "[4/4] Opening Logcat..."
+adb logcat -c
+PID=$(adb shell pidof -s $PACKAGE_NAME)
+adb logcat --pid=$PID
