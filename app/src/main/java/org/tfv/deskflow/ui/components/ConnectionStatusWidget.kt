@@ -32,6 +32,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -161,6 +163,91 @@ fun ConnectionStatusWidget(
       }
     },
   ) {
+    val screen = connState.screen
+    val server = screen?.server
+    if (server != null) {
+      Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth().padding(16.dp)
+      ) {
+        Row(
+          horizontalArrangement = Arrangement.SpaceBetween,
+          modifier = Modifier.fillMaxWidth()
+        ) {
+          Text(
+            text = "Server Address:",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+          )
+          Text(
+            text = "${server.address}:${server.port}",
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+            color = MaterialTheme.colorScheme.onSurface
+          )
+        }
+        
+        Row(
+          horizontalArrangement = Arrangement.SpaceBetween,
+          modifier = Modifier.fillMaxWidth()
+        ) {
+          Text(
+            text = "Screen Name:",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+          )
+          Text(
+            text = screen.name ?: "Unknown",
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+            color = MaterialTheme.colorScheme.onSurface
+          )
+        }
+
+        if (screen.width > 0 && screen.height > 0) {
+          Row(
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth()
+          ) {
+            Text(
+              text = "Resolution:",
+              style = MaterialTheme.typography.bodyMedium,
+              color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+              text = "${screen.width} x ${screen.height}",
+              style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+              color = MaterialTheme.colorScheme.onSurface
+            )
+          }
+        }
+
+        Row(
+          horizontalArrangement = Arrangement.SpaceBetween,
+          modifier = Modifier.fillMaxWidth()
+        ) {
+          Text(
+            text = "Security:",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+          )
+          Text(
+            text = if (server.useTls) "TLS Enabled" else "TLS Disabled",
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (server.useTls) extColorScheme.success else MaterialTheme.colorScheme.onSurfaceVariant
+          )
+        }
+      }
+    } else {
+      Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier.fillMaxWidth().padding(16.dp)
+      ) {
+        Text(
+          text = "No active connection",
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+      }
+    }
   }
 }
 

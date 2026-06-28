@@ -98,17 +98,13 @@ fun HomeScreen(appState: IAppState = LocalAppState.current) {
       when {
         isPortrait && isXL -> 2
         isPortrait -> 1
-        isXL -> 2
-        isLarge -> 2
-        else -> 2
+        else -> 3
       }
 
     val widgetRowCount = ceil(3f / maxItemsPerRow.toDouble())
     val widgetHeight =
       when {
         isPortrait && isXL -> widgetHeightWithItems(2)
-        isPortrait -> widgetHeightWithItems(1)
-        isXL -> widgetHeightWithItems(2)
         else -> widgetHeightWithItems(1)
       }
 
