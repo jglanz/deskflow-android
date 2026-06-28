@@ -37,9 +37,11 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -180,6 +182,10 @@ class GlobalInputService : AccessibilityService() {
 
   /** WindowManager instance for managing the mouse pointer view. */
   private lateinit var windowManager: WindowManager
+
+  private lateinit var focusHighlightView: View
+  private lateinit var focusHighlightLayout: WindowManager.LayoutParams
+  @Volatile private var focusHighlightVisible = false
 
   private val serviceScope =
     CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -410,8 +416,42 @@ class GlobalInputService : AccessibilityService() {
 
     windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
+    focusHighlightView = View(baseContext).apply {
+      val borderSize = (3 * resources.displayMetrics.density).toInt()
+      background = GradientDrawable().apply {
+        setColor(Color.TRANSPARENT)
+        setStroke(borderSize, Color.parseColor("#8000E5FF")) // semi-transparent cyan border
+      }
+    }
+
+    focusHighlightLayout =
+      WindowManager.LayoutParams(
+        WindowManager.LayoutParams.MATCH_PARENT,
+        WindowManager.LayoutParams.MATCH_PARENT,
+        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.TRANSLUCENT,
+      ).apply {
+        gravity = Gravity.FILL
+        layoutInDisplayCutoutMode = LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+      }
+
     startService(Intent(applicationContext, ConnectionService::class.java))
     serviceClient.bind()
+
+    serviceScope.launch {
+      serviceClient.stateFlow.collect { state ->
+        val isActive = state.screen?.isActive == true && state.isConnected
+        if (isActive) {
+          showFocusHighlight()
+        } else {
+          hideFocusHighlight()
+        }
+      }
+    }
   }
 
   /**
@@ -431,7 +471,20 @@ class GlobalInputService : AccessibilityService() {
   override fun onDestroy() {
     serviceScope.cancel()
     serviceClient.unbind()
-    windowManager.removeView(mousePointerView)
+    if (focusHighlightVisible) {
+      try {
+        windowManager.removeView(focusHighlightView)
+      } catch (e: Exception) {
+        // ignore
+      }
+    }
+    if (mousePointerVisible) {
+      try {
+        windowManager.removeView(mousePointerView)
+      } catch (e: Exception) {
+        // ignore
+      }
+    }
     super.onDestroy()
   }
 
@@ -542,6 +595,34 @@ class GlobalInputService : AccessibilityService() {
 
       false -> {
         log.warn { "Overlay permissions not granted yet" }
+      }
+    }
+  }
+
+  private fun showFocusHighlight() {
+    serviceScope.launch(Dispatchers.Main) {
+      if (canDrawOverlays()) {
+        if (!focusHighlightVisible) {
+          try {
+            windowManager.addView(focusHighlightView, focusHighlightLayout)
+            focusHighlightVisible = true
+          } catch (err: Exception) {
+            log.error(err) { "Failed to add focus highlight view" }
+          }
+        }
+      }
+    }
+  }
+
+  private fun hideFocusHighlight() {
+    serviceScope.launch(Dispatchers.Main) {
+      if (focusHighlightVisible) {
+        try {
+          windowManager.removeView(focusHighlightView)
+          focusHighlightVisible = false
+        } catch (err: Exception) {
+          log.error(err) { "Failed to remove focus highlight view" }
+        }
       }
     }
   }
