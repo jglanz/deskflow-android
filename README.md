@@ -25,6 +25,7 @@ A **near** fully functional [Deskflow (deskflow.org)](https://deskflow.org) clie
 
 ## Features & Limitations
 
+- Runs on Android 12 (API 31) and newer
 - Shortcuts & Hotkeys  
   - App Switching (`Command+Tab` or `Alt+Tab`)
   - Arrow keys for general navigation
@@ -33,10 +34,10 @@ A **near** fully functional [Deskflow (deskflow.org)](https://deskflow.org) clie
 - Clipboard integration
   - Text (of any kind) is supported
   - __Bitmap is **NOT** supported currently, but is next on the list__
-- Simple gesture support 
-  - Pull down on the status bar
-  - Pull up for all apps, etc
-- **Content Scrolling is not functional with gestures or click & drag, BUT arrow keys in many apps will work.**
+- Mouse click &amp; drag drives real touch, live
+  - Scroll content by pressing and dragging
+  - Swipe navigation &mdash; app drawer, home, recents and the notification shade
+    &mdash; all work by dragging, committing on release like a real finger
 - **IMPORTANT: TLS is Supported, but individual client certificates are not.**  
 
 ## Installation
