@@ -67,7 +67,6 @@ import arrow.core.raise.catch
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.hypot
-import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -282,6 +281,12 @@ class GlobalInputService : AccessibilityService() {
   private var dragLastDx = 0
 
   private var dragLastDy = 0
+
+  /** Button id of the press currently in progress (see [MouseEvent] ids). */
+  private var activeMouseButton = 0
+
+  private fun isNavButton(button: Int) =
+    button == MOUSE_BUTTON_BACK || button == MOUSE_BUTTON_FORWARD
 
   /** Display bounds captured at button-down, to keep strokes on-screen. */
   private var dragBoundW = 0
@@ -637,16 +642,17 @@ class GlobalInputService : AccessibilityService() {
 
     windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
-    // Hide the pointer whenever the mouse isn't on this screen. The server only
-    // streams moves while its cursor is here (screen.isActive), and leaving
-    // otherwise strands a stale cursor at the exit edge -- which then flashes
-    // back on the next wake before fresh moves arrive.
+    // Hide the pointer whenever the mouse isn't on this screen -- either it left
+    // (screen.isActive, from Enter/Leave) or the connection dropped. The server
+    // only streams moves while its cursor is here, so leaving otherwise strands a
+    // stale cursor at the exit edge, which then flashes back on the next wake
+    // before fresh moves arrive.
     serviceScope.launch {
       serviceClient.stateFlow
-        .map { it.screen.isActive }
+        .map { it.isConnected && it.screen.isActive }
         .distinctUntilChanged()
-        .collect { active ->
-          if (!active) globalInputHandler.post { hideMousePointer() }
+        .collect { onScreen ->
+          if (!onScreen) globalInputHandler.post { hideMousePointer() }
         }
     }
 
@@ -917,37 +923,53 @@ class GlobalInputService : AccessibilityService() {
 
       MouseEvent.Type.Down -> {
         log.debug { "Down [$event]" }
-        // Down/Up carry no coordinates in the protocol -- position lives only in
-        // the Move stream -- so the current pointer position IS the press point.
-        dragStartX = pointerX
-        dragStartY = pointerY
-        // Bounds captured once here (getScreenSize allocates); every stroke point
-        // is clamped to them, since dispatchGesture rejects an out-of-bounds path.
-        val size = getScreenSize().px
-        dragBoundW = size.width
-        dragBoundH = size.height
-        // Arm the drag. The touch isn't pressed until the cursor actually moves
-        // (see advanceDrag); a down/up with no move stays a plain tap.
-        dragButtonDown = true
-        dragStrokeStarted = false
-        dragEndPending = false
+        activeMouseButton = event.id.toInt()
+        // Side buttons don't press a touch -- they map to navigation on release
+        // (below), so don't arm a drag for them.
+        if (!isNavButton(activeMouseButton)) {
+          // Down/Up carry no coordinates in the protocol -- position lives only
+          // in the Move stream -- so the current pointer position IS the press
+          // point.
+          dragStartX = pointerX
+          dragStartY = pointerY
+          // Bounds captured once here (getScreenSize allocates); every stroke
+          // point is clamped to them, as dispatchGesture rejects an out-of-bounds
+          // path.
+          val size = getScreenSize().px
+          dragBoundW = size.width
+          dragBoundH = size.height
+          // Arm the drag. The touch isn't pressed until the cursor actually moves
+          // (see advanceDrag); a down/up with no move stays a plain tap.
+          dragButtonDown = true
+          dragStrokeStarted = false
+          dragEndPending = false
+        }
       }
 
       MouseEvent.Type.Up -> {
         log.debug { "Up [$event]" }
-        dragButtonDown = false
-        if (dragStrokeStarted) {
-          // A live drag is in progress: lift the held touch at the release point.
-          dragEndPending = true
-          if (!dragStrokeInFlight) advanceDrag()
-        } else {
-          // Never moved off the down point -> it was a tap.
-          clickGesture()
+        when (activeMouseButton) {
+          // Standard mouse side buttons: back / forward. Forward -> Recents is
+          // the most useful mapping for a tablet with no forward-history concept.
+          MOUSE_BUTTON_BACK -> performGlobalAction(GLOBAL_ACTION_BACK)
+          MOUSE_BUTTON_FORWARD -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+          else -> {
+            dragButtonDown = false
+            if (dragStrokeStarted) {
+              // A live drag is in progress: lift the held touch at the release
+              // point.
+              dragEndPending = true
+              if (!dragStrokeInFlight) advanceDrag()
+            } else {
+              // Never moved off the down point -> it was a tap.
+              clickGesture()
+            }
+          }
         }
       }
 
       MouseEvent.Type.Wheel -> {
-        if (abs(event.y) < 240) return
+        if (abs(event.y) < WHEEL_DEAD_ZONE) return
         log.debug { "Wheel [${event.x}, ${event.y}]" }
         swipe(up = event.y > 0)
       }
@@ -1097,42 +1119,38 @@ class GlobalInputService : AccessibilityService() {
     globalInputPending = true
 
     val screenSize = getScreenSize()
-
-    val (width, height) =
-      Pair(screenSize.px.width.toFloat(), screenSize.px.height.toFloat())
-    val middleX = width / 2f
+    val height = screenSize.px.height.toFloat()
+    // Scroll the pane under the cursor, not the screen centre, and center the
+    // swipe on the pointer -- so a wheel notch scrolls whatever you're pointing
+    // at. Shorter than a full-screen swipe so a single notch is one modest,
+    // snappy scroll rather than a half-page fling.
+    val x = clampX(pointerX).toFloat()
+    val cy = clampY(pointerY).toFloat()
+    val reach = height * WHEEL_SCROLL_FRACTION / 2f
 
     val (startY, endY) =
       when {
-        up && isHomeScreenActive -> {
-          Pair(
-            pointerY.toFloat(),
-            max(pointerY.toFloat() - (height * 0.42f), 0f),
-          )
-        }
-
-        up -> {
-          Pair(height - 5f, height * 0.42f)
-        }
-
-        else -> {
-          Pair(pointerY.toFloat(), pointerY.toFloat() + (height * 0.5f))
-        }
+        // On the home screen an upward wheel opens the app drawer, matching a
+        // swipe up from the pointer.
+        up && isHomeScreenActive ->
+          Pair(cy, (cy - height * 0.42f).coerceAtLeast(0f))
+        // Wheel up -> finger moves up (content scrolls down under the cursor).
+        up -> Pair((cy + reach).coerceAtMost(height - 1f), (cy - reach).coerceAtLeast(0f))
+        // Wheel down -> finger moves down.
+        else -> Pair((cy - reach).coerceAtLeast(0f), (cy + reach).coerceAtMost(height - 1f))
       }
 
     val path =
       Path().apply {
-        moveTo(middleX, startY)
-        lineTo(middleX, endY)
+        moveTo(x, startY)
+        lineTo(x, endY)
       }
 
-    val stroke = StrokeDescription(path, 0, 500)
+    val stroke = StrokeDescription(path, 0, WHEEL_SCROLL_MS)
 
     val gesture = GestureDescription.Builder().addStroke(stroke).build()
 
-    log.debug {
-      "Swipe up=$up,startY=$startY,endY=$endY,screenSize=$screenSize,path=$path"
-    }
+    log.debug { "Swipe up=$up at x=$x [$startY -> $endY]" }
 
     dispatchGesture(gesture, gestureResultCallback, globalInputHandler)
   }
@@ -1213,6 +1231,17 @@ class GlobalInputService : AccessibilityService() {
 
     /** How long the wake-on-input lock is held; screen-off timer resumes after. */
     private const val WAKE_ON_INPUT_MS = 3_000L
+
+    /** Standard mouse side-button ids in the Deskflow protocol (back / forward). */
+    private const val MOUSE_BUTTON_BACK = 4
+    private const val MOUSE_BUTTON_FORWARD = 5
+
+    /** Minimum wheel delta to act on -- roughly one notch, so each notch scrolls. */
+    private const val WHEEL_DEAD_ZONE = 30
+
+    /** Wheel scroll distance as a fraction of screen height, and its duration. */
+    private const val WHEEL_SCROLL_FRACTION = 0.30f
+    private const val WHEEL_SCROLL_MS = 150L
 
     private val TAG = GlobalInputService::class.java.simpleName
     private val log =
