@@ -67,6 +67,7 @@ import org.tfv.deskflow.data.models.AppPrefsKt.loggingConfig
 import org.tfv.deskflow.data.models.AppPrefsKt.screenConfig
 import org.tfv.deskflow.data.models.copy
 import org.tfv.deskflow.ext.copy
+import org.tfv.deskflow.ext.getSerializableCompat
 import org.tfv.deskflow.ext.toServerTarget
 import org.tfv.deskflow.logging.AndroidForwardingLogger
 import org.tfv.deskflow.logging.LogRecordEvent
@@ -107,7 +108,7 @@ class ConnectionService : Service() {
 
       override fun setClipboardData(bundle: Bundle): Result {
         return catch({
-          val clipboardData = bundle.getSerializable("clipboardData",ClipboardData::class.java)
+          val clipboardData = bundle.getSerializableCompat("clipboardData", ClipboardData::class.java)
           require(clipboardData != null) {
             "clipboardData was not valid in clipboard data bundle"
           }

@@ -61,7 +61,16 @@ android {
 
   defaultConfig {
     applicationId = "org.tfv.deskflow"
-    minSdk = 34
+    // Lowered from 34 (Android 14) to 31 (Android 12) for the Galaxy Tab A7
+    // (SM-T500), which is stuck on 12. compileSdk stays at 36, so no dependency
+    // downgrades are involved -- this only widens the install range.
+    minSdk = 31
+
+    // Pinned to what upstream shipped. This project never declared targetSdk, and
+    // AGP defaults it to minSdk -- so lowering minSdk silently dropped targetSdk
+    // 34 -> 31 too, opting the app back into pre-33 platform behaviour on every
+    // device including modern ones. Only minSdk should have moved.
+    targetSdk = 34
 
     versionCode = projectVersionCode
     versionName = projectVersionName

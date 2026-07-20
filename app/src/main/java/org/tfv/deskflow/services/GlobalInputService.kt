@@ -40,6 +40,7 @@ import android.content.pm.PackageManager
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -75,7 +76,7 @@ import org.tfv.deskflow.ext.getScreenSize
 import org.tfv.deskflow.ext.sendServiceConnectionEvent
 
 @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
-@SuppressLint("ServiceCast", "NewApi")
+@SuppressLint("ServiceCast")
 class GlobalInputService : AccessibilityService() {
 
   private var pickerShownForPackage: String? = null
@@ -204,11 +205,16 @@ class GlobalInputService : AccessibilityService() {
     text: String,
     customizer: (NotificationCompat.Builder.() -> Unit)? = null,
   ) {
+    // POST_NOTIFICATIONS only became a runtime permission in API 33. Older
+    // platforms don't define it, so checkSelfPermission reports DENIED for a
+    // permission that is never actually required there -- gating on it
+    // unconditionally would silence every notification on API 31/32.
     if (
-      ContextCompat.checkSelfPermission(
-        this,
-        Manifest.permission.POST_NOTIFICATIONS,
-      ) != PackageManager.PERMISSION_GRANTED
+      Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        ContextCompat.checkSelfPermission(
+          this,
+          Manifest.permission.POST_NOTIFICATIONS,
+        ) != PackageManager.PERMISSION_GRANTED
     ) {
       log.warn {
         "POST_NOTIFICATIONS permission not granted, cannot send notification."
@@ -236,13 +242,37 @@ class GlobalInputService : AccessibilityService() {
   }
 
   private fun isDeskflowKeyboardActive(
-    imeInfo: InputMethodInfo? = imeManager.currentInputMethodInfo
+    imeInfo: InputMethodInfo? = currentImeInfoCompat
   ): Boolean {
     return imeInfo?.let { current -> deskflowImeInfo?.id == current.id }
       ?: false
   }
 
-  @SuppressLint("NewApi")
+  /**
+   * The IME the user currently has selected, or null if it can't be resolved.
+   *
+   * [InputMethodManager.getCurrentInputMethodInfo] is API **34**+, not 33 as its
+   * placement might suggest -- lint's API database is the authority here, and it
+   * flagged an earlier version of this guard that used 33. On anything older the
+   * method does not exist and invoking it throws NoSuchMethodError, which crashed
+   * this service on every accessibility event it handled. Below 34 we resolve the
+   * same value the way the platform stores it -- Settings.Secure
+   * DEFAULT_INPUT_METHOD holds the flattened ComponentName of the active IME --
+   * and match that against the installed list.
+   */
+  private val currentImeInfoCompat: InputMethodInfo?
+    get() =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        imeManager.currentInputMethodInfo
+      } else {
+        val activeId =
+          android.provider.Settings.Secure.getString(
+            contentResolver,
+            android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
+          )
+        activeId?.let { id -> imeManager.inputMethodList.find { it.id == id } }
+      }
+
   private fun checkIMESetup() {
     val kbOpen = isKeyboardOpened
     val kbWasOpen = keyboardWasOpen.load()
@@ -257,7 +287,7 @@ class GlobalInputService : AccessibilityService() {
 
     keyboardWasOpen.store(true)
 
-    val imeInfo = imeManager.currentInputMethodInfo
+    val imeInfo = currentImeInfoCompat
     if (imeInfo != null) {
       log.debug { "Current IME: ${imeInfo.packageName}" }
       when {
@@ -431,7 +461,13 @@ class GlobalInputService : AccessibilityService() {
   override fun onDestroy() {
     serviceScope.cancel()
     serviceClient.unbind()
-    windowManager.removeView(mousePointerView)
+    // Only added if the overlay permission was held at onServiceConnected time,
+    // so removing unconditionally throws IllegalArgumentException ("not attached
+    // to window manager") and turns a clean shutdown into a crash.
+    if (mousePointerVisible) {
+      windowManager.removeView(mousePointerView)
+      mousePointerVisible = false
+    }
     super.onDestroy()
   }
 
