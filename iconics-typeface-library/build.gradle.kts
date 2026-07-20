@@ -37,7 +37,8 @@ android {
   compileSdk = 36
 
   defaultConfig {
-    minSdk = 33
+    // Must not exceed the app module's minSdk or the manifest merge fails.
+    minSdk = 31
     version = "6.0.0.0"
     consumerProguardFiles.clear()
     consumerProguardFiles.add(File(projectDir, "consumer-proguard-rules.pro"))

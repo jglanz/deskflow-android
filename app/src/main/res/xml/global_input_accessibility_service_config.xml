@@ -31,5 +31,6 @@
         android:notificationTimeout="100"
         android:accessibilityFlags="flagDefault|flagInputMethodEditor|flagRequestFilterKeyEvents|flagRetrieveInteractiveWindows"
         android:canRetrieveWindowContent="true"
+        android:isAccessibilityTool="true"
         />
 

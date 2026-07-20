@@ -30,6 +30,7 @@ package org.tfv.deskflow.client.net
 import java.security.cert.X509Certificate
 import javax.net.ssl.X509TrustManager
 import java.net.InetSocketAddress
+import java.net.StandardSocketOptions
 import java.nio.ByteBuffer
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
@@ -249,6 +250,7 @@ class FullDuplexSocket(
             // Open non-blocking channel for TLS handshake
             SocketChannel.open().apply {
               configureBlocking(false)
+              setOption(StandardSocketOptions.TCP_NODELAY, true)
               connect(InetSocketAddress(host, port))
               register(sel, SelectionKey.OP_CONNECT)
             }
@@ -257,6 +259,13 @@ class FullDuplexSocket(
           else ->
             SocketChannel.open().apply {
               configureBlocking(false)
+              // Disable Nagle's algorithm. The protocol is a stream of very small
+              // messages (a mouse move is a handful of bytes), which is precisely
+              // what Nagle holds back: it waits for an outstanding ACK before
+              // sending the next small write, so input arrives in bursts tens of
+              // milliseconds apart instead of smoothly. Upstream Deskflow sets
+              // TCP_NODELAY on its sockets for the same reason.
+              setOption(StandardSocketOptions.TCP_NODELAY, true)
               connect(InetSocketAddress(host, port))
               register(sel, SelectionKey.OP_CONNECT)
             }

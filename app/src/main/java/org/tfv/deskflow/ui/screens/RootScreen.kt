@@ -28,6 +28,7 @@ package org.tfv.deskflow.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import androidx.annotation.VisibleForTesting
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
@@ -147,6 +148,14 @@ fun RootScreen(appState: IAppState) {
               .collectAsStateWithLifecycle()
 
           // REGULAR PERMISSIONS
+          //
+          // Both of these landed in API 33. On 31/32 the platform has no such
+          // permissions, so the request resolves to "denied" the instant it is
+          // launched and isGranted never flips -- which would pin the user on a
+          // permission dialog they cannot satisfy and never reach the app. They
+          // aren't required on those releases, so skip the prompts entirely.
+          val needsApi33Permissions =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
           val notificationsPermissionState =
             rememberPermissionState(
               android.Manifest.permission.POST_NOTIFICATIONS
@@ -171,7 +180,9 @@ fun RootScreen(appState: IAppState) {
               text = R.string.permission_dialog_ime_enabled_message,
               onClick = { context.launchInputMethodServiceSettings() },
             )
-          } else if (!notificationsPermissionState.status.isGranted) {
+          } else if (
+            needsApi33Permissions && !notificationsPermissionState.status.isGranted
+          ) {
             PermissionsNeededDialog(
               text = R.string.permission_dialog_notifications_message,
               required = false,
@@ -179,7 +190,9 @@ fun RootScreen(appState: IAppState) {
                 notificationsPermissionState.launchPermissionRequest()
               },
             )
-          } else if (!nearbyDevicesPermissionState.status.isGranted) {
+          } else if (
+            needsApi33Permissions && !nearbyDevicesPermissionState.status.isGranted
+          ) {
             PermissionsNeededDialog(
               text = R.string.permission_dialog_nearby_devices_message,
               onClick = {

@@ -40,12 +40,18 @@ import android.content.pm.PackageManager
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
+import android.view.Display
 import android.view.Gravity
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
 import android.view.accessibility.AccessibilityEvent
@@ -60,9 +66,12 @@ import androidx.core.content.ContextCompat
 import arrow.core.raise.catch
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.math.abs
-import kotlin.math.max
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import org.tfv.deskflow.R
 import org.tfv.deskflow.client.events.KeyboardEvent
 import org.tfv.deskflow.client.events.MouseEvent
@@ -75,7 +84,7 @@ import org.tfv.deskflow.ext.getScreenSize
 import org.tfv.deskflow.ext.sendServiceConnectionEvent
 
 @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
-@SuppressLint("ServiceCast", "NewApi")
+@SuppressLint("ServiceCast")
 class GlobalInputService : AccessibilityService() {
 
   private var pickerShownForPackage: String? = null
@@ -99,6 +108,10 @@ class GlobalInputService : AccessibilityService() {
 
   private val notificationManager by lazy {
     getSystemService(NotificationManager::class.java)
+  }
+
+  private val powerManager by lazy {
+    getSystemService(PowerManager::class.java)
   }
 
   /**
@@ -176,6 +189,191 @@ class GlobalInputService : AccessibilityService() {
    */
   @Volatile private var mousePointerVisible = false
 
+  /**
+   * Authoritative pointer position, in pixels.
+   *
+   * Kept separate from [mousePointerLayout] because the layout is only pushed to
+   * the window manager on a throttle (see [schedulePointerApply]), so
+   * between frames the layout holds a stale position. Relative moves and clicks
+   * read these instead, or they would compound against that stale value.
+   *
+   * Seeded to the same coordinates the layout is initialised with.
+   */
+  private var pointerX = 200
+
+  private var pointerY = 200
+
+  /** uptimeMillis of the last pointer layout push, for the update throttle. */
+  private var lastPointerApplyTime = 0L
+
+  /** Whether a trailing-edge pointer push is already queued. */
+  private var trailingApplyScheduled = false
+
+  /** Whether the pointer view is currently shown (mouse is on this screen). */
+  private var pointerShown = false
+
+  /**
+   * Interval between pointer layout pushes, in ms.
+   *
+   * This is the rate at which the pointer *window position* is pushed to the
+   * compositor -- NOT the rate at which incoming mouse events are processed.
+   * Every event updates the logical pointerX/pointerY immediately and uncapped
+   * (native mouse polling is 125Hz-8000Hz), so clicks, drags and gestures always
+   * use the freshest position; this throttle only governs the on-screen redraw.
+   *
+   * Derived from the display refresh rate but clamped to [250Hz, 125Hz] worth of
+   * period. Pushing faster than the panel refreshes doesn't add visible frames --
+   * the compositor still only latches one position per vsync -- but it keeps the
+   * position it latches fresher, shaving input latency. The 125Hz floor is why we
+   * don't just ride vsync: this panel is 60Hz, and 60Hz coalescing leaves the
+   * latched position up to ~16ms stale. The 250Hz cap bounds the per-push
+   * WindowManager relayout cost so a high-refresh panel can't run it away.
+   */
+  private val pointerApplyIntervalMs: Long by lazy {
+    val refreshHz =
+      try {
+        getSystemService(DisplayManager::class.java)
+          .getDisplay(Display.DEFAULT_DISPLAY)
+          ?.refreshRate ?: 60f
+      } catch (err: Exception) {
+        60f
+      }
+    val hz = refreshHz.roundToInt().coerceIn(POINTER_MIN_HZ, POINTER_MAX_HZ)
+    1000L / hz
+  }
+
+  /** Pointer position captured at button-down, used for the click/drag split. */
+  private var dragStartX = 0
+
+  private var dragStartY = 0
+
+  /*
+   * Live drag as a continued gesture.
+   *
+   * A drag has to happen *live* -- content following the cursor as it moves --
+   * not replayed on release. The accessibility API can't inject raw touch
+   * events, but StrokeDescription with willContinue=true does the equivalent: the
+   * first stroke presses and holds the touch, each continueStroke() extends it in
+   * real time, and a final willContinue=false stroke lifts it. That maps exactly
+   * onto mouse down -> moves -> up.
+   *
+   * Only one gesture can be in flight at a time, so strokes are paced by the
+   * completion callback: the next segment (to wherever the cursor is now) is
+   * dispatched when the previous one finishes. Between segments the held touch
+   * stays put, so pausing mid-drag holds rather than lifts.
+   */
+  private var dragButtonDown = false
+
+  private var dragStrokeStarted = false
+
+  private var dragEndPending = false
+
+  private var dragStrokeInFlight = false
+
+  private var lastStroke: StrokeDescription? = null
+
+  /** Endpoint of the last dispatched stroke; the next segment starts here. */
+  private var lastDragX = 0
+
+  private var lastDragY = 0
+
+  /** Most recent movement delta, used to carry momentum into the release. */
+  private var dragLastDx = 0
+
+  private var dragLastDy = 0
+
+  /** Button id of the press currently in progress (see [MouseEvent] ids). */
+  private var activeMouseButton = 0
+
+  private fun isNavButton(button: Int) =
+    button == MOUSE_BUTTON_BACK || button == MOUSE_BUTTON_FORWARD
+
+  /** Display bounds captured at button-down, to keep strokes on-screen. */
+  private var dragBoundW = 0
+
+  private var dragBoundH = 0
+
+  private val dragGestureCallback =
+    object : GestureResultCallback() {
+      override fun onCompleted(gestureDescription: GestureDescription) {
+        dragStrokeInFlight = false
+        advanceDrag()
+      }
+
+      override fun onCancelled(gestureDescription: GestureDescription) {
+        // The system dropped the gesture (e.g. another took over); abandon the
+        // chain rather than leave a touch half-held.
+        endDragChain()
+      }
+    }
+
+  /**
+   * Movement below this (px) is a click, not a drag. Uses the platform touch
+   * slop so a slightly jittery press still registers as a tap, matching how the
+   * framework itself distinguishes the two.
+   */
+  private val touchSlop by lazy {
+    ViewConfiguration.get(this).scaledTouchSlop
+  }
+
+  /**
+   * Push the latest pointer position to the window manager.
+   *
+   * [WindowManager.updateViewLayout] is a synchronous round trip to
+   * WindowManagerService that forces a relayout, so it must not run per incoming
+   * event -- Deskflow streams moves far faster than that. Callers reach it
+   * through [schedulePointerApply], which throttles to [pointerApplyIntervalMs].
+   */
+  private fun applyPointerLayout() {
+    if (!mousePointerVisible) return
+    mousePointerLayout.x = pointerX
+    mousePointerLayout.y = pointerY
+    windowManager.updateViewLayout(mousePointerView, mousePointerLayout)
+    // Reveal only now that a real position has been pushed, so re-entry (and the
+    // first move after a wake) never flashes the pointer at its stale exit spot.
+    if (!pointerShown) {
+      mousePointerView.visibility = View.VISIBLE
+      pointerShown = true
+    }
+  }
+
+  /** Hide the pointer view without detaching its window; see [applyPointerLayout]. */
+  private fun hideMousePointer() {
+    if (!pointerShown) return
+    mousePointerView.visibility = View.INVISIBLE
+    pointerShown = false
+  }
+
+  private val trailingApplyRunnable = Runnable {
+    trailingApplyScheduled = false
+    lastPointerApplyTime = SystemClock.uptimeMillis()
+    applyPointerLayout()
+  }
+
+  /**
+   * Throttle pointer pushes to [pointerApplyIntervalMs], leading + trailing edge.
+   *
+   * An isolated move applies immediately (leading edge -- no added latency beyond
+   * the next vsync). During a burst, intermediate moves only update pointerX/Y
+   * and a single trailing push is queued for the end of the interval, so the many
+   * events between two pushes collapse into one relayout carrying the newest
+   * position. Idle costs nothing: no move, no wakeup.
+   */
+  private fun schedulePointerApply() {
+    val now = SystemClock.uptimeMillis()
+    val elapsed = now - lastPointerApplyTime
+    if (elapsed >= pointerApplyIntervalMs) {
+      lastPointerApplyTime = now
+      applyPointerLayout()
+    } else if (!trailingApplyScheduled) {
+      trailingApplyScheduled = true
+      globalInputHandler.postDelayed(
+        trailingApplyRunnable,
+        pointerApplyIntervalMs - elapsed,
+      )
+    }
+  }
+
   private val keyboardWasOpen = AtomicBoolean(false)
 
   /** WindowManager instance for managing the mouse pointer view. */
@@ -204,11 +402,16 @@ class GlobalInputService : AccessibilityService() {
     text: String,
     customizer: (NotificationCompat.Builder.() -> Unit)? = null,
   ) {
+    // POST_NOTIFICATIONS only became a runtime permission in API 33. Older
+    // platforms don't define it, so checkSelfPermission reports DENIED for a
+    // permission that is never actually required there -- gating on it
+    // unconditionally would silence every notification on API 31/32.
     if (
-      ContextCompat.checkSelfPermission(
-        this,
-        Manifest.permission.POST_NOTIFICATIONS,
-      ) != PackageManager.PERMISSION_GRANTED
+      Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        ContextCompat.checkSelfPermission(
+          this,
+          Manifest.permission.POST_NOTIFICATIONS,
+        ) != PackageManager.PERMISSION_GRANTED
     ) {
       log.warn {
         "POST_NOTIFICATIONS permission not granted, cannot send notification."
@@ -236,13 +439,37 @@ class GlobalInputService : AccessibilityService() {
   }
 
   private fun isDeskflowKeyboardActive(
-    imeInfo: InputMethodInfo? = imeManager.currentInputMethodInfo
+    imeInfo: InputMethodInfo? = currentImeInfoCompat
   ): Boolean {
     return imeInfo?.let { current -> deskflowImeInfo?.id == current.id }
       ?: false
   }
 
-  @SuppressLint("NewApi")
+  /**
+   * The IME the user currently has selected, or null if it can't be resolved.
+   *
+   * [InputMethodManager.getCurrentInputMethodInfo] is API **34**+, not 33 as its
+   * placement might suggest -- lint's API database is the authority here, and it
+   * flagged an earlier version of this guard that used 33. On anything older the
+   * method does not exist and invoking it throws NoSuchMethodError, which crashed
+   * this service on every accessibility event it handled. Below 34 we resolve the
+   * same value the way the platform stores it -- Settings.Secure
+   * DEFAULT_INPUT_METHOD holds the flattened ComponentName of the active IME --
+   * and match that against the installed list.
+   */
+  private val currentImeInfoCompat: InputMethodInfo?
+    get() =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        imeManager.currentInputMethodInfo
+      } else {
+        val activeId =
+          android.provider.Settings.Secure.getString(
+            contentResolver,
+            android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
+          )
+        activeId?.let { id -> imeManager.inputMethodList.find { it.id == id } }
+      }
+
   private fun checkIMESetup() {
     val kbOpen = isKeyboardOpened
     val kbWasOpen = keyboardWasOpen.load()
@@ -257,7 +484,7 @@ class GlobalInputService : AccessibilityService() {
 
     keyboardWasOpen.store(true)
 
-    val imeInfo = imeManager.currentInputMethodInfo
+    val imeInfo = currentImeInfoCompat
     if (imeInfo != null) {
       log.debug { "Current IME: ${imeInfo.packageName}" }
       when {
@@ -408,7 +635,26 @@ class GlobalInputService : AccessibilityService() {
     mousePointerLayout.x = 200
     mousePointerLayout.y = 200
 
+    // Start hidden: the pointer should only appear once the server's mouse has
+    // actually crossed onto this screen and given us a real position. Revealed
+    // by the first move after that (see moveMousePointer).
+    mousePointerView.visibility = View.INVISIBLE
+
     windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
+    // Hide the pointer whenever the mouse isn't on this screen -- either it left
+    // (screen.isActive, from Enter/Leave) or the connection dropped. The server
+    // only streams moves while its cursor is here, so leaving otherwise strands a
+    // stale cursor at the exit edge, which then flashes back on the next wake
+    // before fresh moves arrive.
+    serviceScope.launch {
+      serviceClient.stateFlow
+        .map { it.isConnected && it.screen.isActive }
+        .distinctUntilChanged()
+        .collect { onScreen ->
+          if (!onScreen) globalInputHandler.post { hideMousePointer() }
+        }
+    }
 
     startService(Intent(applicationContext, ConnectionService::class.java))
     serviceClient.bind()
@@ -431,7 +677,13 @@ class GlobalInputService : AccessibilityService() {
   override fun onDestroy() {
     serviceScope.cancel()
     serviceClient.unbind()
-    windowManager.removeView(mousePointerView)
+    // Only added if the overlay permission was held at onServiceConnected time,
+    // so removing unconditionally throws IllegalArgumentException ("not attached
+    // to window manager") and turns a clean shutdown into a crash.
+    if (mousePointerVisible) {
+      windowManager.removeView(mousePointerView)
+      mousePointerVisible = false
+    }
     super.onDestroy()
   }
 
@@ -445,11 +697,7 @@ class GlobalInputService : AccessibilityService() {
   private fun clickClosestNodeToPointer() {
     val nodeInfo = rootInActiveWindow ?: return
     val nearestNodeToMouse: AccessibilityNodeInfo? =
-      findSmallestNodeAtPoint(
-        nodeInfo,
-        mousePointerLayout.x,
-        mousePointerLayout.y,
-      )
+      findSmallestNodeAtPoint(nodeInfo, pointerX, pointerY)
     if (nearestNodeToMouse != null) {
       logNodeHierarchy(nearestNodeToMouse, 0)
       nearestNodeToMouse.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -463,8 +711,8 @@ class GlobalInputService : AccessibilityService() {
    * > service.
    */
   private fun clickGesture(
-    x: Float = mousePointerLayout.x.toFloat(),
-    y: Float = mousePointerLayout.y.toFloat(),
+    x: Float = pointerX.toFloat(),
+    y: Float = pointerY.toFloat(),
   ) {
 
     log.debug { "Click gesture at [$x, $y]" }
@@ -485,45 +733,243 @@ class GlobalInputService : AccessibilityService() {
   private fun moveMousePointer(x: Int, y: Int) {
     if (!mousePointerVisible) return
 
-    val screenSize = getScreenSize()
+    // getScreenSize() allocates three objects per call. Kept inside the lambda
+    // so that cost is paid only when debug logging is actually enabled -- the
+    // log message is lazy, but an argument evaluated outside it is not.
     log.debug {
+      val screenSize = getScreenSize()
       "Cursor move to [${x}, ${y}] with size(${screenSize.px.width},${screenSize.px.height})"
     }
-    mousePointerLayout.x = x
-    mousePointerLayout.y = y
 
-    windowManager.updateViewLayout(mousePointerView, mousePointerLayout)
+    pointerX = x
+    pointerY = y
+    // Feed the live drag: if the button is down and no stroke is mid-flight, push
+    // a segment to the new position now. Otherwise the completion callback picks
+    // it up when the current stroke finishes.
+    if (dragButtonDown && !dragStrokeInFlight) advanceDrag()
+    schedulePointerApply()
   }
+
+  private fun clampX(x: Int) = x.coerceIn(0, (dragBoundW - 1).coerceAtLeast(0))
+
+  private fun clampY(y: Int) = y.coerceIn(0, (dragBoundH - 1).coerceAtLeast(0))
+
+  /**
+   * Advance the live drag one segment: press on the first move, extend toward the
+   * cursor on each subsequent move, and lift once the button is up.
+   *
+   * Runs only when no stroke is in flight (the accessibility system dispatches
+   * one gesture at a time). Called from a move, or from the completion callback
+   * as each segment finishes.
+   */
+  private fun advanceDrag() {
+    if (dragStrokeInFlight) return
+    // Once the button is up and no stroke is live, there is nothing to advance.
+    // Without this, the release lift's own completion callback re-enters the
+    // start branch below -- the cursor is still far from the (stale) down point,
+    // so it presses a phantom touch with no button held, which reads as "never
+    // let go": the drag re-grabs and only a fresh click breaks it.
+    if (!dragButtonDown && !dragStrokeStarted) return
+    val cx = clampX(pointerX)
+    val cy = clampY(pointerY)
+
+    if (!dragStrokeStarted) {
+      // Don't press until the cursor leaves the down point by more than touch
+      // slop -- within slop it's a tap (jitter and all), handled on Up via
+      // clickGesture. The press starts at the down point and reaches the cursor.
+      val sx = clampX(dragStartX)
+      val sy = clampY(dragStartY)
+      if (hypot((cx - sx).toFloat(), (cy - sy).toFloat()) < touchSlop) return
+      lastStroke = StrokeDescription(segmentPath(sx, sy, cx, cy), 0, DRAG_STROKE_MS, true)
+      dragLastDx = cx - sx
+      dragLastDy = cy - sy
+      lastDragX = cx
+      lastDragY = cy
+      dragStrokeStarted = true
+      dispatchDragStroke(isFinal = false)
+      return
+    }
+
+    val moved = cx != lastDragX || cy != lastDragY
+    when {
+      dragEndPending -> {
+        // Release: reach the current point AND carry one more step of the recent
+        // velocity, over a short interval, so the touch-up has real momentum.
+        // Velocity-sensitive system gestures (app drawer, home, recents) commit
+        // on release velocity -- lifting with none, or nudging backwards, makes
+        // them snap shut no matter how far you dragged.
+        val ex = clampX(cx + dragLastDx)
+        val ey = clampY(cy + dragLastDy)
+        val path =
+          if (ex != lastDragX || ey != lastDragY) {
+            segmentPath(lastDragX, lastDragY, ex, ey)
+          } else {
+            // No momentum to carry: lift with a 1px nudge in the drag direction
+            // (never backwards), since a reversing nudge cancels the gesture.
+            segmentPath(lastDragX, lastDragY, lastDragX, (lastDragY - 1).coerceAtLeast(0))
+          }
+        lastStroke = lastStroke?.continueStroke(path, 0, RELEASE_FLICK_MS, false)
+        dragStrokeStarted = false
+        dispatchDragStroke(isFinal = true)
+      }
+      moved -> {
+        dragLastDx = cx - lastDragX
+        dragLastDy = cy - lastDragY
+        lastStroke =
+          lastStroke?.continueStroke(segmentPath(lastDragX, lastDragY, cx, cy), 0, DRAG_STROKE_MS, true)
+        lastDragX = cx
+        lastDragY = cy
+        dispatchDragStroke(isFinal = false)
+      }
+      // else: not moved, not ending -> touch holds in place, nothing to dispatch.
+    }
+  }
+
+  private fun dispatchDragStroke(isFinal: Boolean) {
+    val stroke = lastStroke
+    if (stroke == null) {
+      endDragChain()
+      return
+    }
+    dragStrokeInFlight = true
+    try {
+      val gesture = GestureDescription.Builder().addStroke(stroke).build()
+      val dispatched =
+        dispatchGesture(gesture, dragGestureCallback, globalInputHandler)
+      if (!dispatched) {
+        dragStrokeInFlight = false
+        endDragChain()
+      }
+    } catch (err: Exception) {
+      log.warn(err) { "Failed to dispatch drag stroke" }
+      dragStrokeInFlight = false
+      endDragChain()
+    }
+    if (isFinal) {
+      // The lift is on its way; the chain is done once this completes.
+      lastStroke = null
+      dragEndPending = false
+    }
+  }
+
+  /** Abandon the drag chain and reset all of its state. */
+  private fun endDragChain() {
+    dragButtonDown = false
+    dragStrokeStarted = false
+    dragEndPending = false
+    dragStrokeInFlight = false
+    lastStroke = null
+  }
+
+  private fun segmentPath(x0: Int, y0: Int, x1: Int, y1: Int): Path =
+    Path().apply {
+      moveTo(x0.toFloat(), y0.toFloat())
+      lineTo(x1.toFloat(), y1.toFloat())
+    }
 
   /**
    * Move the cursor to the specified coordinates. This is used to move the
    * mouse pointer to a specific location on the screen.
    * > Example: Used for mouse movement in the global input service.
    */
+  /**
+   * Turn the screen on if it is currently off.
+   *
+   * SCREEN_BRIGHT_WAKE_LOCK + ACQUIRE_CAUSES_WAKEUP is the only route to wake the
+   * display from a background context (the modern Activity flags need a visible
+   * activity, which this service isn't). Both are deprecated but still the
+   * supported mechanism for exactly this case. We acquire with a short timeout
+   * and ON_AFTER_RELEASE, so the lock self-releases and hands control back to the
+   * normal screen-off timer rather than pinning the display on.
+   *
+   * Guarded by isInteractive so it is a cheap no-op while the screen is already
+   * on -- which it is for all but the first event after the device sleeps.
+   *
+   * Caveat: once the device is in deep Doze the TCP connection is frozen, so no
+   * event arrives to trigger this until a maintenance window. Wake-on-mouse is
+   * therefore reliable right after the screen turns off or while charging, not
+   * after long idle on battery.
+   */
+  @Suppress("DEPRECATION")
+  private fun wakeScreenIfAsleep() {
+    if (powerManager.isInteractive) return
+    try {
+      powerManager
+        .newWakeLock(
+          PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+            PowerManager.ACQUIRE_CAUSES_WAKEUP or
+            PowerManager.ON_AFTER_RELEASE,
+          "deskflow:mouse-wake",
+        )
+        .acquire(WAKE_ON_INPUT_MS)
+    } catch (err: Exception) {
+      log.warn(err) { "Failed to wake screen" }
+    }
+  }
+
   private fun onMouseEvent(event: MouseEvent) {
+    // Any mouse activity from the server means the user is reaching for this
+    // screen -- wake it if it's asleep so the pointer isn't moving on a dark
+    // panel.
+    wakeScreenIfAsleep()
     when (event.type) {
       MouseEvent.Type.Move -> {
         moveMousePointer(event.x, event.y)
       }
 
       MouseEvent.Type.MoveRelative -> {
-        moveMousePointer(
-          mousePointerLayout.x + event.x,
-          mousePointerLayout.y + event.y,
-        )
+        moveMousePointer(pointerX + event.x, pointerY + event.y)
       }
 
       MouseEvent.Type.Down -> {
         log.debug { "Down [$event]" }
+        activeMouseButton = event.id.toInt()
+        // Side buttons don't press a touch -- they map to navigation on release
+        // (below), so don't arm a drag for them.
+        if (!isNavButton(activeMouseButton)) {
+          // Down/Up carry no coordinates in the protocol -- position lives only
+          // in the Move stream -- so the current pointer position IS the press
+          // point.
+          dragStartX = pointerX
+          dragStartY = pointerY
+          // Bounds captured once here (getScreenSize allocates); every stroke
+          // point is clamped to them, as dispatchGesture rejects an out-of-bounds
+          // path.
+          val size = getScreenSize().px
+          dragBoundW = size.width
+          dragBoundH = size.height
+          // Arm the drag. The touch isn't pressed until the cursor actually moves
+          // (see advanceDrag); a down/up with no move stays a plain tap.
+          dragButtonDown = true
+          dragStrokeStarted = false
+          dragEndPending = false
+        }
       }
 
       MouseEvent.Type.Up -> {
         log.debug { "Up [$event]" }
-        clickGesture()
+        when (activeMouseButton) {
+          // Standard mouse side buttons: back / forward. Forward -> Recents is
+          // the most useful mapping for a tablet with no forward-history concept.
+          MOUSE_BUTTON_BACK -> performGlobalAction(GLOBAL_ACTION_BACK)
+          MOUSE_BUTTON_FORWARD -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+          else -> {
+            dragButtonDown = false
+            if (dragStrokeStarted) {
+              // A live drag is in progress: lift the held touch at the release
+              // point.
+              dragEndPending = true
+              if (!dragStrokeInFlight) advanceDrag()
+            } else {
+              // Never moved off the down point -> it was a tap.
+              clickGesture()
+            }
+          }
+        }
       }
 
       MouseEvent.Type.Wheel -> {
-        if (abs(event.y) < 240) return
+        if (abs(event.y) < WHEEL_DEAD_ZONE) return
         log.debug { "Wheel [${event.x}, ${event.y}]" }
         swipe(up = event.y > 0)
       }
@@ -673,45 +1119,38 @@ class GlobalInputService : AccessibilityService() {
     globalInputPending = true
 
     val screenSize = getScreenSize()
-
-    val (width, height) =
-      Pair(screenSize.px.width.toFloat(), screenSize.px.height.toFloat())
-    val middleX = width / 2f
+    val height = screenSize.px.height.toFloat()
+    // Scroll the pane under the cursor, not the screen centre, and center the
+    // swipe on the pointer -- so a wheel notch scrolls whatever you're pointing
+    // at. Shorter than a full-screen swipe so a single notch is one modest,
+    // snappy scroll rather than a half-page fling.
+    val x = clampX(pointerX).toFloat()
+    val cy = clampY(pointerY).toFloat()
+    val reach = height * WHEEL_SCROLL_FRACTION / 2f
 
     val (startY, endY) =
       when {
-        up && isHomeScreenActive -> {
-          Pair(
-            mousePointerLayout.y.toFloat(),
-            max(mousePointerLayout.y.toFloat() - (height * 0.42f), 0f),
-          )
-        }
-
-        up -> {
-          Pair(height - 5f, height * 0.42f)
-        }
-
-        else -> {
-          Pair(
-            mousePointerLayout.y.toFloat(),
-            mousePointerLayout.y.toFloat() + (height * 0.5f),
-          )
-        }
+        // On the home screen an upward wheel opens the app drawer, matching a
+        // swipe up from the pointer.
+        up && isHomeScreenActive ->
+          Pair(cy, (cy - height * 0.42f).coerceAtLeast(0f))
+        // Wheel up -> finger moves up (content scrolls down under the cursor).
+        up -> Pair((cy + reach).coerceAtMost(height - 1f), (cy - reach).coerceAtLeast(0f))
+        // Wheel down -> finger moves down.
+        else -> Pair((cy - reach).coerceAtLeast(0f), (cy + reach).coerceAtMost(height - 1f))
       }
 
     val path =
       Path().apply {
-        moveTo(middleX, startY)
-        lineTo(middleX, endY)
+        moveTo(x, startY)
+        lineTo(x, endY)
       }
 
-    val stroke = StrokeDescription(path, 0, 500)
+    val stroke = StrokeDescription(path, 0, WHEEL_SCROLL_MS)
 
     val gesture = GestureDescription.Builder().addStroke(stroke).build()
 
-    log.debug {
-      "Swipe up=$up,startY=$startY,endY=$endY,screenSize=$screenSize,path=$path"
-    }
+    log.debug { "Swipe up=$up at x=$x [$startY -> $endY]" }
 
     dispatchGesture(gesture, gestureResultCallback, globalInputHandler)
   }
@@ -770,6 +1209,39 @@ class GlobalInputService : AccessibilityService() {
   companion object {
     private const val CHANNEL_ID = "deskflow_service_channel"
     private const val NOTIF_IME_NOT_SETUP_ID = 1
+
+    /**
+     * Duration of each live-drag segment; also the chain's pacing interval, since
+     * the next segment is dispatched when this one completes (~40 segments/sec).
+     * Short enough to track the cursor closely, long enough not to flood the
+     * accessibility gesture dispatcher.
+     */
+    private const val DRAG_STROKE_MS = 24L
+
+    /**
+     * Duration of the final release segment. Short, so extrapolating the recent
+     * movement over it produces a fast touch-up -- the fling velocity that
+     * velocity-sensitive system gestures need to commit on release.
+     */
+    private const val RELEASE_FLICK_MS = 8L
+
+    /** Pointer push-rate bounds; see [pointerApplyIntervalMs]. */
+    private const val POINTER_MIN_HZ = 125
+    private const val POINTER_MAX_HZ = 250
+
+    /** How long the wake-on-input lock is held; screen-off timer resumes after. */
+    private const val WAKE_ON_INPUT_MS = 3_000L
+
+    /** Standard mouse side-button ids in the Deskflow protocol (back / forward). */
+    private const val MOUSE_BUTTON_BACK = 4
+    private const val MOUSE_BUTTON_FORWARD = 5
+
+    /** Minimum wheel delta to act on -- roughly one notch, so each notch scrolls. */
+    private const val WHEEL_DEAD_ZONE = 30
+
+    /** Wheel scroll distance as a fraction of screen height, and its duration. */
+    private const val WHEEL_SCROLL_FRACTION = 0.30f
+    private const val WHEEL_SCROLL_MS = 150L
 
     private val TAG = GlobalInputService::class.java.simpleName
     private val log =
