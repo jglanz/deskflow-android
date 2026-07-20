@@ -31,6 +31,8 @@
             tools:ignore="ProtectedPermissions"/>
 
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Wake the screen when input arrives while the device is asleep. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
