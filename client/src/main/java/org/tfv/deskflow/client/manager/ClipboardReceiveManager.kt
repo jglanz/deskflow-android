@@ -116,12 +116,32 @@ class ClipboardReceiveManager {
       val startData =
         DataInputStream(ByteArrayInputStream(startMsg.data, 1, startMsg.data.size - 1))
       val startDataSize = startData.readInt()
+      if (startDataSize < 0 || startDataSize > MAX_CLIPBOARD_BYTES) {
+        log.warn { "Clipboard start data size $startDataSize exceeds cap $MAX_CLIPBOARD_BYTES; aborting transfer" }
+        return
+      }
       val startDataStrBytes = ByteArray(startDataSize)
       startData.readFully(startDataStrBytes)
       val startDataStr = String(startDataStrBytes, Charsets.UTF_8)
 
       val dataSize = startDataStr.toInt()
       log.info { "Clipboard data start says data size is $dataSize bytes" }
+
+      // Enforce a running total cap across all clipboard data chunks so a
+      // malicious/buggy server cannot force an out-of-memory allocation.
+      var totalChunkBytes = 0
+      for (msg in dataMsgs) {
+        val lenStream = DataInputStream(ByteArrayInputStream(msg.data, 1, msg.data.size - 1))
+        val chunkLen = lenStream.readInt()
+        if (chunkLen < 0 || totalChunkBytes + chunkLen > MAX_CLIPBOARD_BYTES) {
+          log.warn {
+            "Clipboard chunk length $chunkLen exceeds cap $MAX_CLIPBOARD_BYTES " +
+              "(total $totalChunkBytes); aborting transfer"
+          }
+          return
+        }
+        totalChunkBytes += chunkLen
+      }
 
       val allDataBytes = dataMsgs.flatMap { msg ->
         val dataStrBytes = DataInputStream(ByteArrayInputStream(msg.data, 1, msg.data.size - 1))
@@ -138,6 +158,10 @@ class ClipboardReceiveManager {
         val format = ClipboardData.Format.entries.find { it.code == formatCode }
         if (format != null) {
           val variantDataSize = allDataInput.readInt()
+          if (variantDataSize < 0 || variantDataSize > MAX_CLIPBOARD_BYTES) {
+            log.warn { "Clipboard variant size $variantDataSize exceeds cap $MAX_CLIPBOARD_BYTES; aborting transfer" }
+            return
+          }
           val variantDataBytes = ByteArray(variantDataSize)
           allDataInput.readFully(variantDataBytes)
           variants[format] = ClipboardData.Variant(format, variantDataBytes)
@@ -168,6 +192,8 @@ class ClipboardReceiveManager {
   }
 
   companion object {
+      const val MAX_CLIPBOARD_BYTES = 8 * 1024 * 1024
+
       private val log = KLoggingManager.logger("ClipboardManager")
   }
 }

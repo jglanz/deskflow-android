@@ -24,8 +24,11 @@
 
 package org.tfv.deskflow.services
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Bundle
 import android.os.IBinder
 import android.os.RemoteCallbackList
@@ -33,6 +36,8 @@ import arrow.core.raise.catch
 import io.github.oshai.kotlinlogging.Level
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,10 +45,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import org.tfv.deskflow.BuildConfig
+import org.tfv.deskflow.R
 import org.tfv.deskflow.client.Client
 import org.tfv.deskflow.client.ClientEventBus
 import org.tfv.deskflow.client.events.ClientEvent
@@ -61,6 +65,8 @@ import org.tfv.deskflow.data.aidl.IConnectionServiceCallback
 import org.tfv.deskflow.data.aidl.Result
 import org.tfv.deskflow.data.aidl.ScreenState
 import org.tfv.deskflow.data.appPrefsStore
+import org.tfv.deskflow.data.DeskflowClientCertificateProvider
+import org.tfv.deskflow.data.TrustedServersFileStore
 import org.tfv.deskflow.data.models.AppPrefs
 import org.tfv.deskflow.data.models.AppPrefsKt.ScreenConfigKt.serverConfig
 import org.tfv.deskflow.data.models.AppPrefsKt.loggingConfig
@@ -74,6 +80,44 @@ import org.tfv.deskflow.logging.LogRecordEvent
 class ConnectionService : Service() {
   companion object {
     private val log = KLoggingManager.forwardingLogger<ConnectionService>()
+    private const val NOTIFICATION_CHANNEL_ID = "deskflow_connection_service"
+    private const val NOTIFICATION_ID = 0xDF01
+  }
+
+  /**
+   * Promote this service to the foreground with a persistent notification. On
+   * Android 14+ a long-lived socket-owning service must be foreground (and
+   * started via startForegroundService, e.g. from BootReceiver) or the system
+   * kills it / rejects the background start.
+   */
+  private fun startAsForeground() {
+    val manager = getSystemService(NotificationManager::class.java)
+    val channel =
+      NotificationChannel(
+          NOTIFICATION_CHANNEL_ID,
+          getString(R.string.connection_service_notification_channel_name),
+          NotificationManager.IMPORTANCE_LOW,
+        )
+        .apply {
+          description =
+            getString(R.string.connection_service_notification_channel_description)
+        }
+    manager.createNotificationChannel(channel)
+
+    val notification =
+      NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+        .setSmallIcon(R.drawable.deskflow_icon_fit)
+        .setContentTitle(getString(R.string.app_name))
+        .setContentText(getString(R.string.connection_service_notification_text))
+        .setOngoing(true)
+        .build()
+
+    ServiceCompat.startForeground(
+      this,
+      NOTIFICATION_ID,
+      notification,
+      ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+    )
   }
 
   private var connectionStateUpdateJob: Job? = null
@@ -94,7 +138,12 @@ class ConnectionService : Service() {
   private val broadcastExecutor =
     Executors.newSingleThreadExecutor(broadcastThreadFactory)
 
-  private val client = Client()
+  private val client =
+    Client(
+      trustStore = TrustedServersFileStore(this),
+      // Software-backed client cert for PeerAuth (the server requires one).
+      clientCertProvider = DeskflowClientCertificateProvider(this),
+    )
 
   /** The connection state model */
   private lateinit var connectionStateModel: ConnectionStateModel
@@ -152,24 +201,29 @@ class ConnectionService : Service() {
             message = ""
           }
         if (levelName != null) {
-          catch({
-            val level = Level.valueOf(levelName)
-            runBlocking {
-              appPrefsStore.updateData { appPrefs ->
-                appPrefs.copy {
-                  loggingConfig {
-                    forwardingLevel = level.name
-                    forwardingEnabled = true
-                  }
+          // Validate the level name synchronously so an invalid value still
+          // reports an error in the returned Result.
+          val level =
+            try {
+              Level.valueOf(levelName)
+            } catch (err: IllegalArgumentException) {
+              log.error(err) { "Invalid log level: $levelName" }
+              result.message = err.message
+              return result
+            }
+          // Persist off the binder/main thread; return an optimistic Result.
+          serviceScope.launch {
+            appPrefsStore.updateData { appPrefs ->
+              appPrefs.copy {
+                loggingConfig {
+                  forwardingLevel = level.name
+                  forwardingEnabled = true
                 }
               }
             }
             AndroidForwardingLogger.forwardingLevel = level
-            result.ok = true
-          }) { err: Throwable ->
-            log.error(err) { "Invalid log level: $levelName" }
-            result.message = err.message
           }
+          result.ok = true
         } else {
           result.message = "levelName is null"
         }
@@ -192,7 +246,8 @@ class ConnectionService : Service() {
             ok = false
             message = "screenState is null"
           }
-        runBlocking {
+        // Persist off the binder/main thread; return an optimistic Result.
+        serviceScope.launch {
           appPrefsStore.updateData { appPrefs ->
             return@updateData appPrefs
               .toBuilder()
@@ -214,11 +269,11 @@ class ConnectionService : Service() {
       }
 
       override fun getState(): ConnectionState {
-        return runBlocking {
-          return@runBlocking connectionStateModel.state
-            .stateIn(serviceScope)
-            .value
-        }
+        // connectionStateModel.state is already a hot StateFlow; read its current
+        // value synchronously. (The previous single-arg stateIn(scope) suspends
+        // until the flow completes, which a StateFlow never does, so runBlocking
+        // blocked the calling/binder thread forever — an ANR on every client bind.)
+        return connectionStateModel.state.value
       }
     }
 
@@ -318,6 +373,7 @@ class ConnectionService : Service() {
 
   override fun onCreate() {
     super.onCreate()
+    startAsForeground()
     log.debug { "onCreate:${this::class.java.simpleName}" }
 
 //    if (BuildConfig.DEBUG) {
@@ -346,25 +402,33 @@ class ConnectionService : Service() {
   private fun sendToClients(fn: IConnectionServiceCallback.() -> Unit) {
     if (broadcastExecutor.isShutdown) return
 
-    broadcastExecutor.submit {
-      synchronized(broadcastLock) {
-        try {
-          val count = connectionCallbacks.beginBroadcast()
+    // onDestroy takes broadcastLock and calls shutdownNow(); the isShutdown
+    // check above is outside the lock, so a shutdown can land between the check
+    // and submit and throw RejectedExecutionException up into the caller (e.g.
+    // ClientEventBus.emit). Swallow it during teardown.
+    try {
+      broadcastExecutor.submit {
+        synchronized(broadcastLock) {
           try {
-            for (i in 0 until count) {
-              try {
-                connectionCallbacks.getBroadcastItem(i).fn()
-              } catch (e: Exception) {
-                log.error(e) { "Error sending to client" }
+            val count = connectionCallbacks.beginBroadcast()
+            try {
+              for (i in 0 until count) {
+                try {
+                  connectionCallbacks.getBroadcastItem(i).fn()
+                } catch (e: Exception) {
+                  log.error(e) { "Error sending to client" }
+                }
               }
+            } finally {
+              connectionCallbacks.finishBroadcast()
             }
-          } finally {
-            connectionCallbacks.finishBroadcast()
+          } catch (err: Exception) {
+            log.error(err) { "Error sendingToClients" }
           }
-        } catch (err: Exception) {
-          log.error(err) { "Error sendingToClients" }
         }
       }
+    } catch (e: java.util.concurrent.RejectedExecutionException) {
+      // Executor shut down during teardown race — drop this event.
     }
   }
 

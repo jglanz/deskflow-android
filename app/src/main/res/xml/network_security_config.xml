@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Deny cleartext traffic for the platform HTTP/SSL stack (hygiene + pre-empts the
+  Play Console cleartext-traffic flag). NOTE: this does NOT gate the Deskflow
+  socket, which uses a raw NIO SocketChannel (bypasses the platform stack) —
+  plaintext there is an explicit user opt-in via the "Use TLS" setting, and TLS
+  is the recommended default.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

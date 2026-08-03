@@ -28,6 +28,9 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Run tests and lint
+        run: ./gradlew :client:test :app:lintDebug
+
       - name: Update AndroidManifest version, commit, and tag (if manual)
         run: |
           VERSION_TYPE="${{ github.event.inputs.versionType }}"

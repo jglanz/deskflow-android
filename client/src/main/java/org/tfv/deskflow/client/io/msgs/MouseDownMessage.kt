@@ -31,7 +31,9 @@ class MouseDownMessage(
 ) : Message(MessageType.DMOUSEDOWN) {
 
     override fun readData(inStream: DataInputStream, dataSize: Int) {
-        buttonId = inStream.readByte().toUInt()
+        // readByte() is signed; toUByte() treats it as unsigned 0..255 so ids
+        // >= 128 are not sign-extended to 0xFFFFFFxx.
+        buttonId = inStream.readByte().toUByte().toUInt()
     }
 
     override fun writeData(outStream: DataOutputStream) {

@@ -73,6 +73,14 @@ fun readVersionProperties(project: Project): Pair<String, Int> {
     }
   val versionName = versionParts.joinToString(separator = ".")
   val (major, minor, patch) = versionParts.map { it.toInt() }
+  // The versionCode scheme ("%d%02d%02d") zero-pads minor/patch to 2 digits,
+  // so any value >= 100 silently collides (e.g. 1.0.100 and 10.1.0 -> 100100).
+  // Fail fast instead of emitting an ambiguous code.
+  if (minor >= 100 || patch >= 100) {
+    throw IllegalStateException(
+      "Version components minor ($minor) and patch ($patch) must be < 100 to avoid versionCode collisions"
+    )
+  }
   val versionCode = String.format("%d%02d%02d", major, minor, patch).toInt(10)
   project.logger.info(
     "Resolved (version=$versionName,versionCode=$versionCode)"

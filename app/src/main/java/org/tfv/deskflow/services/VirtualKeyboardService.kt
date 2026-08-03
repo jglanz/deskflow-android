@@ -365,6 +365,11 @@ class VirtualKeyboardService : InputMethodService() {
     label: String = getString(R.string.clipboard_item_label),
   ) {
     val clip = ClipData.newPlainText(label, text)
+    // Mask the Android 13+ paste preview (copied text may be a password).
+    clip.description.extras =
+      android.os.PersistableBundle().apply {
+        putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true)
+      }
     clipboard.setPrimaryClip(clip)
   }
 

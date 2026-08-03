@@ -30,6 +30,7 @@ import android.accessibilityservice.GestureDescription
 import android.accessibilityservice.GestureDescription.StrokeDescription
 import android.annotation.SuppressLint
 import android.app.NotificationChannel
+import android.media.AudioManager
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.ClipData
@@ -43,6 +44,7 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PersistableBundle
 import android.util.Log
 import android.view.Gravity
 import android.view.View
@@ -60,15 +62,17 @@ import androidx.core.content.ContextCompat
 import arrow.core.raise.catch
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.math.abs
-import kotlin.math.max
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.tfv.deskflow.R
 import org.tfv.deskflow.client.events.KeyboardEvent
 import org.tfv.deskflow.client.events.MouseEvent
+import org.tfv.deskflow.client.events.MouseButton
 import org.tfv.deskflow.client.events.ScreenEvent
 import org.tfv.deskflow.client.models.ClipboardData
+import org.tfv.deskflow.client.util.Keyboard
 import org.tfv.deskflow.client.util.logging.KLoggingManager
+import org.tfv.deskflow.data.appPrefsStore
 import org.tfv.deskflow.components.GlobalKeyboardManager
 import org.tfv.deskflow.ext.canDrawOverlays
 import org.tfv.deskflow.ext.getScreenSize
@@ -99,6 +103,10 @@ class GlobalInputService : AccessibilityService() {
 
   private val notificationManager by lazy {
     getSystemService(NotificationManager::class.java)
+  }
+
+  private val audio by lazy {
+    getSystemService(AudioManager::class.java)
   }
 
   /**
@@ -333,6 +341,13 @@ class GlobalInputService : AccessibilityService() {
       }
     }
 
+    // Keep the pointer-sensitivity multiplier in sync with user preferences.
+    serviceScope.launch {
+      appPrefsStore.data.collect { prefs ->
+        mouseSensitivity = if (prefs.mouseSensitivity == 0.0f) 1.0f else prefs.mouseSensitivity
+      }
+    }
+
     serviceClient =
       ConnectionServiceClient(this) { event ->
         globalInputHandler.post {
@@ -375,9 +390,25 @@ class GlobalInputService : AccessibilityService() {
                     }
 
                   log.debug { "Clipboard variant ready: $variant" }
+                  // Mark remote-injected clipboard as sensitive so Android 13+
+                  // masks the paste preview (content arriving from the server is
+                  // unknown and may include passwords). [ClipDescription.setExtras]
+                  // is a public API since API 33.
+                  clipData.description.extras =
+                    PersistableBundle().apply {
+                      putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+                    }
                   clipboard.setPrimaryClip(clipData)
                   break
                 }
+              }
+
+              is ScreenEvent.Enter, is ScreenEvent.Leave -> {
+                // Re-sync the pointer delta baseline on screen transitions so the
+                // first move after (re-)entry is an absolute jump, not a scaled
+                // delta from a stale server position.
+                lastServerX = Int.MIN_VALUE
+                lastServerY = Int.MIN_VALUE
               }
 
               else -> {}
@@ -410,7 +441,14 @@ class GlobalInputService : AccessibilityService() {
 
     windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
-    startService(Intent(applicationContext, ConnectionService::class.java))
+    // ConnectionService is a foreground service; start it with
+    // startForegroundService so it can promote itself within the window (a plain
+    // startService from this background accessibility context can be rejected
+    // with BackgroundServiceStartNotAllowedException on Android 12+).
+    ContextCompat.startForegroundService(
+      this,
+      Intent(applicationContext, ConnectionService::class.java),
+    )
     serviceClient.bind()
   }
 
@@ -421,7 +459,25 @@ class GlobalInputService : AccessibilityService() {
    */
   private fun onKeyboardEvent(event: KeyboardEvent) {
     log.debug { "onKeyboardEvent: $event" }
+    // Volume keys are handled directly via the AudioManager (they are not
+    // GLOBAL_ACTIONs), and only on key-down: the Barrier protocol delivers both
+    // Down and Up, so acting on both would step the volume twice per press.
+    if (event.type == KeyboardEvent.Type.Down && handleVolumeKey(event)) return
     keyboardManager.process(event)
+  }
+
+  /** @return true if [event] was a volume/media key that was handled here. */
+  private fun handleVolumeKey(event: KeyboardEvent): Boolean {
+    when (event.id.toInt()) {
+      Keyboard.SpecialKey.VolumeUp.code ->
+        audio.adjustVolume(AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+      Keyboard.SpecialKey.VolumeDown.code ->
+        audio.adjustVolume(AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+      Keyboard.SpecialKey.VolumeMute.code ->
+        audio.adjustVolume(AudioManager.ADJUST_TOGGLE_MUTE, AudioManager.FLAG_SHOW_UI)
+      else -> return false
+    }
+    return true
   }
 
   /**
@@ -431,7 +487,13 @@ class GlobalInputService : AccessibilityService() {
   override fun onDestroy() {
     serviceScope.cancel()
     serviceClient.unbind()
-    windowManager.removeView(mousePointerView)
+    // Only the overlay-permission path in setupMousePointer() ever addView()s
+    // the pointer; removing it unconditionally throws IllegalArgumentException
+    // (and crashes the service) when the view was never added.
+    if (mousePointerVisible) {
+      windowManager.removeView(mousePointerView)
+      mousePointerVisible = false
+    }
     super.onDestroy()
   }
 
@@ -500,32 +562,84 @@ class GlobalInputService : AccessibilityService() {
    * mouse pointer to a specific location on the screen.
    * > Example: Used for mouse movement in the global input service.
    */
+  /** Configured pointer sensitivity (1.0 = track the server exactly). */
+  @Volatile private var mouseSensitivity = 1.0f
+
+  /**
+   * Last absolute position reported by the server; `Int.MIN_VALUE` means "reset"
+   * (next move jumps to the absolute position instead of scaling a delta). Reset
+   * on screen enter/leave so the first move after a screen transition re-syncs.
+   */
+  @Volatile private var lastServerX = Int.MIN_VALUE
+  @Volatile private var lastServerY = Int.MIN_VALUE
+
+  /**
+   * Scales the absolute server position's delta by [mouseSensitivity] and
+   * clamps to the screen. First call after a baseline reset (or at sensitivity
+   * 1.0) returns the raw position so the pointer re-syncs exactly.
+   */
+  private fun applyPointerSensitivity(serverX: Int, serverY: Int): Pair<Int, Int> {
+    val s = mouseSensitivity
+    if (s == 1.0f || lastServerX == Int.MIN_VALUE) {
+      lastServerX = serverX
+      lastServerY = serverY
+      return serverX to serverY
+    }
+    val dx = (serverX - lastServerX) * s
+    val dy = (serverY - lastServerY) * s
+    lastServerX = serverX
+    lastServerY = serverY
+    val screen = getScreenSize().px
+    val nx = (mousePointerLayout.x + dx).toInt().coerceIn(0, screen.width)
+    val ny = (mousePointerLayout.y + dy).toInt().coerceIn(0, screen.height)
+    return nx to ny
+  }
+
   private fun onMouseEvent(event: MouseEvent) {
     when (event.type) {
       MouseEvent.Type.Move -> {
-        moveMousePointer(event.x, event.y)
+        // The server streams ABSOLUTE positions (DMMV, since the server runs
+        // with relativeMouseMoves=false), so a multiplier on the value itself
+        // would be meaningless. Instead scale the per-update DELTA by the
+        // configured sensitivity (clamped to the screen); the first move after
+        // a baseline reset jumps to the absolute position. At sensitivity 1.0
+        // this is a no-op (exact server tracking).
+        val (nx, ny) = applyPointerSensitivity(event.x, event.y)
+        moveMousePointer(nx, ny)
       }
 
       MouseEvent.Type.MoveRelative -> {
+        val s = mouseSensitivity
         moveMousePointer(
-          mousePointerLayout.x + event.x,
-          mousePointerLayout.y + event.y,
+          mousePointerLayout.x + (event.x * s).toInt(),
+          mousePointerLayout.y + (event.y * s).toInt(),
         )
       }
 
       MouseEvent.Type.Down -> {
         log.debug { "Down [$event]" }
+        // Back/forward mouse buttons (X1/X2) drive system navigation, fired on
+        // press. Left/right/middle are gesture-driven and handled on release.
+        when (event.id) {
+          MouseButton.X1_BACK -> performGlobalAction(GLOBAL_ACTION_BACK)
+          // X2 ("forward") has no equivalent AccessibilityService global action
+          // — only Back is exposed system-wide — so it is a no-op for now.
+          MouseButton.X2_FORWARD -> Unit
+        }
       }
 
       MouseEvent.Type.Up -> {
         log.debug { "Up [$event]" }
-        clickGesture()
+        // Only the primary button performs a click gesture on release; other
+        // buttons (right/middle/back/forward) have no tap behavior here.
+        if (event.id == MouseButton.LEFT) {
+          clickGesture()
+        }
       }
 
       MouseEvent.Type.Wheel -> {
-        if (abs(event.y) < 240) return
         log.debug { "Wheel [${event.x}, ${event.y}]" }
-        swipe(up = event.y > 0)
+        scrollBy(event.x, event.y)
       }
     }
   }
@@ -662,58 +776,72 @@ class GlobalInputService : AccessibilityService() {
   }
 
   /**
-   * Perform a swipe gesture. If [up] is true, it swipes up, otherwise it swipes
-   * down. The swipe starts from the middle of the screen and goes to the top or
-   * bottom.
-   * > Example: Used for scrolling in lists or returning to the home screen.
+   * Accumulated (sub-threshold) mouse-wheel delta waiting to be turned into a
+   * scroll gesture. Wheel events and gesture callbacks are all dispatched on the
+   * main looper ([globalInputHandler]), so these need no synchronization.
    */
-  private fun swipe(up: Boolean = false) {
+  private var wheelAccumX = 0
+  private var wheelAccumY = 0
+
+  /**
+   * Scroll by the mouse-wheel delta, scaled to pixels. Unlike the old fixed
+   * swipe, the distance reflects the wheel magnitude, and small/slow deltas
+   * accumulate instead of being dropped or collapsed into a single jump.
+   * > Example: scroll a list or web page with the mouse wheel.
+   */
+  private fun scrollBy(deltaX: Int, deltaY: Int) {
+    wheelAccumX += deltaX
+    wheelAccumY += deltaY
+    flushWheelScroll()
+  }
+
+  private fun flushWheelScroll() {
     if (globalInputPending) return
 
-    globalInputPending = true
+    val dx = wheelAccumX
+    val dy = wheelAccumY
+    if (dx == 0 && dy == 0) return
+    wheelAccumX = 0
+    wheelAccumY = 0
 
-    val screenSize = getScreenSize()
+    val screen = getScreenSize().px
+    // One wheel unit ~= 12% of the screen height (tunable); clamped to a sane
+    // range so extreme deltas don't overscroll the whole viewport.
+    val pxPerUnit =
+      (screen.height * 0.12f).toInt().coerceIn(1, screen.height.coerceAtLeast(1))
+    val duration = (150L + 8L * (abs(dx) + abs(dy))).coerceIn(150L, 400L)
 
-    val (width, height) =
-      Pair(screenSize.px.width.toFloat(), screenSize.px.height.toFloat())
-    val middleX = width / 2f
+    val cx = mousePointerLayout.x.toFloat()
+    val cy = mousePointerLayout.y.toFloat()
+    val builder = GestureDescription.Builder()
 
-    val (startY, endY) =
-      when {
-        up && isHomeScreenActive -> {
-          Pair(
-            mousePointerLayout.y.toFloat(),
-            max(mousePointerLayout.y.toFloat() - (height * 0.42f), 0f),
-          )
+    if (dy != 0) {
+      // Wheel "up" (dy > 0) scrolls content up: the touch path moves toward
+      // decreasing Y, preserving the prior swipe(up = true) convention.
+      val dist = (dy * pxPerUnit).toFloat()
+      val path =
+        Path().apply {
+          moveTo(cx, cy)
+          lineTo(cx, cy - dist)
         }
-
-        up -> {
-          Pair(height - 5f, height * 0.42f)
+      builder.addStroke(StrokeDescription(path, 0, duration))
+    }
+    if (dx != 0) {
+      // Horizontal wheel/tilt: dx > 0 scrolls right (path toward +X).
+      val dist = (dx * pxPerUnit).toFloat()
+      val path =
+        Path().apply {
+          moveTo(cx, cy)
+          lineTo(cx + dist, cy)
         }
-
-        else -> {
-          Pair(
-            mousePointerLayout.y.toFloat(),
-            mousePointerLayout.y.toFloat() + (height * 0.5f),
-          )
-        }
-      }
-
-    val path =
-      Path().apply {
-        moveTo(middleX, startY)
-        lineTo(middleX, endY)
-      }
-
-    val stroke = StrokeDescription(path, 0, 500)
-
-    val gesture = GestureDescription.Builder().addStroke(stroke).build()
-
-    log.debug {
-      "Swipe up=$up,startY=$startY,endY=$endY,screenSize=$screenSize,path=$path"
+      builder.addStroke(StrokeDescription(path, 0, duration))
     }
 
-    dispatchGesture(gesture, gestureResultCallback, globalInputHandler)
+    globalInputPending = true
+    log.debug {
+      "scrollBy dx=$dx dy=$dy pxPerUnit=$pxPerUnit duration=$duration"
+    }
+    dispatchGesture(builder.build(), gestureResultCallback, globalInputHandler)
   }
 
   /**

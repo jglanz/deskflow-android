@@ -48,11 +48,16 @@ import androidx.navigation.NavController
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavOptions
 import androidx.navigation.compose.composable
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import org.tfv.deskflow.R
 import org.tfv.deskflow.client.util.logging.KLoggingManager
+import org.tfv.deskflow.data.DeskflowClientCertificateProvider
+import org.tfv.deskflow.data.appPrefsStore
 import org.tfv.deskflow.data.aidl.ScreenState
+import org.tfv.deskflow.data.models.copy
 import org.tfv.deskflow.data.aidl.ServerState
 import org.tfv.deskflow.ui.annotations.PreviewAll
 import org.tfv.deskflow.ui.components.AppState
@@ -134,6 +139,19 @@ fun SettingsScreen(
       var port by remember(screenValue) { mutableIntStateOf(screenValue.server.port) }
       var useTls by remember(screenValue) { mutableStateOf(screenValue.server.useTls) }
       var isDirty by remember(screenValue) { mutableStateOf(false) }
+
+      // Pointer speed is a LOCAL setting (not server config), so it reads/writes
+      // the app prefs DataStore directly rather than going through onChange.
+      val ctx = LocalContext.current
+      val scope = rememberCoroutineScope()
+      val storedSensitivity by remember(ctx) {
+        ctx.appPrefsStore.data
+          .map { raw -> if (raw.mouseSensitivity == 0f) 1f else raw.mouseSensitivity }
+          .catch { emit(1f) }
+      }.collectAsStateWithLifecycle(initialValue = 1f)
+      var sensitivitySlider by remember(storedSensitivity) {
+        mutableStateOf(storedSensitivity)
+      }
 
       val saveChanges ={
         onChange(
@@ -235,6 +253,49 @@ fun SettingsScreen(
                 .padding(horizontal = 16.dp, vertical = 8.dp)
                 .verticalScroll(innerScrollState),
           ) {
+            // This device's client-certificate fingerprint (shown once it exists,
+            // i.e. after the first TLS connect) for registration on a PeerAuth
+            // (mutual-TLS) server. Read-only: never generates a cert from the UI.
+            val clientCertFingerprint = remember {
+              runCatching {
+                DeskflowClientCertificateProvider(ctx).fingerprintIfPresent()
+              }.getOrNull()
+            }
+            if (clientCertFingerprint != null) {
+              Text(
+                text =
+                  stringResource(
+                    R.string.settings_screen_client_cert_fingerprint,
+                    clientCertFingerprint,
+                  ),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+              )
+            }
+            Column(modifier = Modifier.fillMaxWidth()) {
+              Text(
+                stringResource(R.string.settings_screen_pointer_speed),
+                style = MaterialTheme.typography.bodyMedium,
+              )
+              Slider(
+                value = sensitivitySlider,
+                onValueChange = { sensitivitySlider = it },
+                onValueChangeFinished = {
+                  scope.launch {
+                    ctx.appPrefsStore.updateData { prefs ->
+                      prefs.copy { mouseSensitivity = sensitivitySlider }
+                    }
+                  }
+                },
+                valueRange = 0.25f..3.0f,
+              )
+              Text(
+                "%.2fx".format(sensitivitySlider),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
             Row(
               horizontalArrangement = Arrangement.SpaceBetween,
               verticalAlignment = Alignment.CenterVertically,

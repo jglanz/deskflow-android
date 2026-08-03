@@ -49,6 +49,13 @@ else
   PATCH=$((PATCH + 1))
 fi
 VERSION="$MAJOR.$MINOR.$PATCH"
+# Fail fast: minor/patch >= 100 would collide the %d%02d%02d versionCode scheme
+# (e.g. 1.0.100 and 10.1.0 both encode to 100100). Keep in sync with
+# buildSrc ProcessHelpers.kt:readVersionProperties.
+if [ "$MINOR" -ge 100 ] || [ "$PATCH" -ge 100 ]; then
+  echo "ERROR: minor ($MINOR) or patch ($PATCH) >= 100 would collide the versionCode scheme" >&2
+  exit 1
+fi
 VERSION_CODE=$(echo $VERSION | awk -F. '{ printf("%d%02d%02d", $1,$2,$3) }')
 echo "major=$MAJOR" > $VERSION_PROPS
 echo "minor=$MINOR" >> $VERSION_PROPS

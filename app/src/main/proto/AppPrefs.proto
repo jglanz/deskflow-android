@@ -46,4 +46,9 @@ message AppPrefs {
 
   LoggingConfig logging = 3;
 
+  // Multiplier applied to the on-screen pointer movement (1.0 = track server
+  // exactly; <1 slower/more precise, >1 faster). 0 is treated as 1.0 (default
+  // for prefs persisted before this field existed).
+  float mouse_sensitivity = 4;
+
 }

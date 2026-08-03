@@ -24,8 +24,13 @@
 
 package org.tfv.deskflow.client.util
 
+import java.util.concurrent.CopyOnWriteArrayList
+
 open class SimpleEventEmitter<Payload> : ISimpleEventEmitter<Payload> {
-    private val listeners = mutableListOf<(Payload) -> Unit>()
+    // CopyOnWriteArrayList makes on/off/clear/emit safe across the many threads
+    // that touch the global ClientEventBus, and its snapshot iterator means a
+    // once() listener removing itself during emit() no longer throws CME.
+    private val listeners = CopyOnWriteArrayList<(Payload) -> Unit>()
 
     /** Register a listener for [event]. */
     override fun on(listener: (payload: Payload) -> Unit) {

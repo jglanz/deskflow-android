@@ -80,16 +80,22 @@ class MessageHandler(
 
   /** Called on dispose to clean up resources. */
   override fun onDispose() {
-    synchronized(this) {
+    // Snapshot the executors under the lock, then shut them down outside it.
+    // Tasks running on these executors re-enter synchronized(this) (onMessages,
+    // scheduleKeepAliveCheck, cancelKeepAliveCheck), so awaiting termination
+    // while holding the monitor self-deadlocks: awaitTermination waits for a
+    // task that is itself blocked on the monitor we hold.
+    val executors = synchronized(this) {
       ClientEventBus.off(this::onClientEvent)
       cancelKeepAliveCheck(true)
       listOf(scheduledExecutor, messageExecutor)
-        .filter { !it.isShutdown }
-        .forEach {
-          it.shutdownNow()
-          it.awaitTermination(5, TimeUnit.SECONDS)
-        }
     }
+    executors
+      .filter { !it.isShutdown }
+      .forEach {
+        it.shutdownNow()
+        it.awaitTermination(5, TimeUnit.SECONDS)
+      }
   }
 
   private val isConnected: Boolean

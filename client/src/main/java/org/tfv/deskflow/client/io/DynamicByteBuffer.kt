@@ -173,7 +173,7 @@ class DynamicByteBuffer(
         synchronized(mutationLock) {
             val count = read(dest, length, offset)
             if (count > 0) {
-                System.arraycopy(buf, readPos, buf, offset, capacity - count)
+                System.arraycopy(buf, readPos, buf, offset, capacity - readPos)
                 readPos -= count
                 writePos -= count
             }
@@ -222,9 +222,19 @@ class DynamicByteBuffer(
 
         override fun read(dest: ByteArray, offset: Int, len: Int): Int {
             return synchronized(buffer.mutationLock) {
-                if (buffer.availableReadSize > 0) {
-                    buffer.pop(dest, len, buffer.readPos + offset)
-                } else -1
+                when {
+                    len <= 0 -> 0
+                    buffer.availableReadSize <= 0 -> -1
+                    else -> {
+                        // Read up to len bytes (short read when less is available),
+                        // placing them at the destination offset. Source is always
+                        // the current read position; offset is dest placement only.
+                        val toRead = minOf(len, buffer.availableReadSize)
+                        val data = buffer.pop(toRead)
+                        System.arraycopy(data, 0, dest, offset, toRead)
+                        toRead
+                    }
+                }
             }
         }
     }

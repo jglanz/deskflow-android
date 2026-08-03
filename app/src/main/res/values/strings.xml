@@ -34,6 +34,8 @@
     <string name="settings_screen_screen_address_placeholder">Hostname or IP Address</string>
     <string name="settings_screen_screen_port_placeholder">24800</string>
     <string name="app_prefs_screen_server_use_tls">Use TLS</string>
+    <string name="settings_screen_client_cert_fingerprint">This device\'s client certificate fingerprint (register it on a PeerAuth / mutual-TLS server):\n%s</string>
+    <string name="settings_screen_pointer_speed">Pointer speed</string>
     <string name="bottom_bar_connected">Connected\n%s</string>
     <string name="bottom_bar_disconnected">Disconnected\n%s</string>
 
@@ -82,6 +84,9 @@
     <string name="global_input_service_notification_channel_description">Notifications related to Deskflow input</string>
     <string name="global_input_service_notification_ime_not_setup">Deskflow Keyboard is not currently active.</string>
     <string name="global_input_service_notification_action_open_keyboard_settings">Open Keyboard Settings</string>
+    <string name="connection_service_notification_channel_name">Deskflow connection</string>
+    <string name="connection_service_notification_channel_description">Keeps the Deskflow connection to your server alive in the background.</string>
+    <string name="connection_service_notification_text">Connected to your Deskflow server</string>
     <string name="toast_settings_saved">Successfully saved settings.</string>
     <string name="permission_dialog_notifications_message"><![CDATA[Enable notifications in order for Deskflow connectivity & clipboard event information.]]></string>
     <string name="permission_dialog_buttons_dismiss">Ignore</string>

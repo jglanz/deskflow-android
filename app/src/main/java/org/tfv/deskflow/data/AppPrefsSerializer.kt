@@ -54,6 +54,8 @@ object AppPrefsSerializer : Serializer<AppPrefs> {
                 useTls = false
             }
         }
+
+        mouseSensitivity = 1.0f
     }
 
     override suspend fun readFrom(input: InputStream): AppPrefs {

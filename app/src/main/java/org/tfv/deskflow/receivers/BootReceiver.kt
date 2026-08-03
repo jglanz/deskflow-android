@@ -27,6 +27,7 @@ package org.tfv.deskflow.receivers
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import androidx.core.content.ContextCompat
 import org.tfv.deskflow.services.ConnectionService
 import org.tfv.deskflow.services.GlobalInputService
 
@@ -37,8 +38,13 @@ class BootReceiver : BroadcastReceiver() {
         if (ctx == null)
             return
         if (Intent.ACTION_BOOT_COMPLETED == intent!!.action) {
-
-            ctx.startService(Intent(ctx, ConnectionService::class.java))
+            // ConnectionService is a foreground service; it must be started with
+            // startForegroundService so it can promote itself (Android 14+ would
+            // otherwise reject the background start / kill it).
+            ContextCompat.startForegroundService(
+                ctx,
+                Intent(ctx, ConnectionService::class.java),
+            )
             ctx.startService(Intent(ctx, GlobalInputService::class.java))
         }
     }

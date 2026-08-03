@@ -34,13 +34,17 @@ import java.util.concurrent.TimeUnit
 class SingletonThreadExecutor(val threadName: String) : AbstractDisposable() {
   private val threadLock = Any()
 
+  // Tracks the current worker so [isExecutorThread] stays accurate. The factory
+  // MUST return a fresh Thread on every call: a single-thread executor asks the
+  // factory for a replacement if the worker dies, and reusing an already-started
+  // (or dead) Thread throws IllegalThreadStateException and permanently wedges
+  // the executor.
   private var thread: Thread? = null
   private val threadFactory = ThreadFactory { r ->
     synchronized(threadLock) {
-      if (thread == null)
-        thread = Thread(r, threadName)
-
-      return@ThreadFactory thread
+      val t = Thread(r, threadName)
+      thread = t
+      return@ThreadFactory t
     }
   }
 

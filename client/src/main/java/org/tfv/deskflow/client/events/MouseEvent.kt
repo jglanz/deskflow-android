@@ -43,3 +43,15 @@ data class MouseEvent(val type: Type, val id: UInt, val x: Int, val y: Int) : Cl
         fun wheel(x: Int, y:Int) = MouseEvent(Type.Wheel,0u,x,y)
     }
 }
+
+/**
+ * Deskflow mouse button ids as carried on the wire (Synergy/Barrier/Deskflow
+ * convention): 1=left, 2=right, 3=middle, 4=X1/back, 5=X2/forward.
+ */
+object MouseButton {
+    val LEFT: UInt = 1u
+    val RIGHT: UInt = 2u
+    val MIDDLE: UInt = 3u
+    val X1_BACK: UInt = 4u
+    val X2_FORWARD: UInt = 5u
+}

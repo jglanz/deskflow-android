@@ -43,4 +43,36 @@ class MessageTemplateTest {
 
     }
 
+    /**
+     * The wire parser keys messages on a leading literal code (e.g. "DKDN"),
+     * which is 4 characters for the Deskflow messages but longer for the legacy
+     * Barrier/Synergy handshake ("Barrier", "Synergy"). Every code must be a
+     * non-empty alphabetic identifier (no specifier leaked into the code).
+     */
+    @Test
+    fun allTemplatesHaveAlphabeticCode() {
+        for (template in MessageTemplate.entries) {
+            assertTrue(template.code.isNotEmpty(), "empty code for $template")
+            assertTrue(
+                template.code.matches(Regex("[A-Za-z]+")),
+                "non-alphabetic code for $template: '${template.code}'",
+            )
+        }
+    }
+
+    /**
+     * Every template must be retrievable from its own prefix (so a received
+     * frame with that code dispatches to the right message class). Where two
+     * templates share a code (e.g. legacy variants), the lookup returns the
+     * first — so assert the returned code matches rather than strict identity.
+     */
+    @Test
+    fun allTemplatesResolveViaPrefix() {
+        for (template in MessageTemplate.entries) {
+            val resolved = MessageTemplate.templateFromPrefix(template.prefix)
+            assertNotNull(resolved, "no template for prefix '${template.prefix}' ($template)")
+            assertEquals(template.code, resolved?.code, "prefix lookup for $template")
+        }
+    }
+
 }

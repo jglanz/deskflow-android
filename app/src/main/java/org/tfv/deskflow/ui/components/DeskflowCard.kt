@@ -26,7 +26,7 @@ package org.tfv.deskflow.ui.components
 
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -195,7 +195,7 @@ fun DeskflowCardWidget(
   style: DeskflowCardStyle = deskflowCardWidgetStyleDefaults(),
   content: @Composable ColumnScope.(style: DeskflowCardStyle) -> Unit,
 ) {
-  BoxWithConstraints(modifier = style.containerModifier.padding(16.dp)) {
+  Box(modifier = style.containerModifier.padding(16.dp)) {
     val cardComponent =
       @Composable {
         DeskflowCard(

@@ -27,8 +27,6 @@
 package org.tfv.deskflow.client.net
 
 
-import java.security.cert.X509Certificate
-import javax.net.ssl.X509TrustManager
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SelectionKey
@@ -40,9 +38,14 @@ import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLEngineResult
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSession
+import javax.net.ssl.X509TrustManager
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.tfv.deskflow.client.io.DynamicByteBuffer
+import org.tfv.deskflow.client.net.tls.ClientCertificateProvider
+import org.tfv.deskflow.client.net.tls.FingerprintTrustManager
+import org.tfv.deskflow.client.net.tls.ServerTrustStore
+import org.tfv.deskflow.client.net.tls.systemDefaultTrustManager
 import org.tfv.deskflow.client.util.AbstractDisposable
 import org.tfv.deskflow.client.util.ISimpleEventEmitter
 import org.tfv.deskflow.client.util.SimpleEventEmitter
@@ -52,6 +55,14 @@ class FullDuplexSocket(
   private val host: String,
   private val port: Int,
   private val useTls: Boolean,
+  /**
+   * Optional persistent fingerprint store. When provided, TLS authenticates the
+   * server by SHA-256 fingerprint TOFU (Deskflow parity). When null, TLS uses the
+   * platform/system CA trust manager (secure default; rejects self-signed certs).
+   */
+  private val trustStore: ServerTrustStore? = null,
+  /** Optional client-certificate provider for mutual TLS (Deskflow `PeerAuth`). */
+  private val clientCertProvider: ClientCertificateProvider? = null,
 ) :
   AbstractDisposable(),
   ISimpleEventEmitter<FullDuplexSocket.SocketEvent> by SimpleEventEmitter<
@@ -79,7 +90,7 @@ class FullDuplexSocket(
   private var netOutBuffer: ByteBuffer? = null
   private var netInBuffer: ByteBuffer? = null
   private var appInBuffer: ByteBuffer? = null
-  private val trustManager = AllCertsTrustManager()
+  private var tlsTrustManager: X509TrustManager? = null
 
   /** Check if the socket thread is running */
   val isRunning: Boolean
@@ -128,7 +139,7 @@ class FullDuplexSocket(
         if (channel.isConnected) {
           try {
             channel.close()
-          } catch (err: Error) {}
+          } catch (err: Exception) {}
         }
         this.channel = null
       }
@@ -137,7 +148,7 @@ class FullDuplexSocket(
       if (selector != null) {
         try {
           selector.close()
-        } catch (err: Error) {}
+        } catch (err: Exception) {}
         this.selector = null
       }
 
@@ -168,12 +179,13 @@ class FullDuplexSocket(
         log.warn { "Socket is not running" }
         return
       }
-
-      // Enqueue the next message
+      // Enqueue, then wake the selector. Only the selector thread mutates
+      // SelectionKey.interestOps (it re-arms OP_WRITE at the top of the loop and
+      // clears it once the queue drains); mutating it here from the caller
+      // thread raced with that clear and could strand a queued message.
       outbound.put(ByteBuffer.wrap(data))
-      // Wake up selector in case it’s blocked
-      selector?.wakeup()
     }
+    selector?.wakeup()
 
     log.trace { "Send message queued ${data.size}" }
   }
@@ -194,7 +206,14 @@ class FullDuplexSocket(
           if (sc.read(netInBuffer) < 0)
             throw SSLException("Channel closed during handshake")
           netInBuffer.flip()
-          val res = sslEngine.unwrap(netInBuffer, appInBuffer)
+          var res = sslEngine.unwrap(netInBuffer, appInBuffer)
+          // Grow the app buffer on OVERFLOW so the handshake can't stall on a
+          // too-small destination. (UNDERFLOW here is fine on the non-blocking
+          // path — the outer while simply re-enters NEED_UNWRAP for more bytes.)
+          if (res.status == SSLEngineResult.Status.BUFFER_OVERFLOW) {
+            appInBuffer = ByteBuffer.allocate(sslEngine.session.applicationBufferSize)
+            res = sslEngine.unwrap(netInBuffer, appInBuffer)
+          }
           netInBuffer.compact()
           hsStatus = res.handshakeStatus
         }
@@ -216,6 +235,10 @@ class FullDuplexSocket(
         else -> throw SSLException("Unexpected handshake status: $hsStatus")
       }
     }
+    // The handshake reached FINISHED/NOT_HANDSHAKING — only now persist the
+    // staged first-use fingerprint, so a responder that failed the handshake is
+    // never pinned.
+    (tlsTrustManager as? FingerprintTrustManager)?.commitPin()
   }
 
   private fun runLoop() {
@@ -230,13 +253,33 @@ class FullDuplexSocket(
       channel =
         when {
           useTls -> {
-            // Initialize SSL context and engine for client mode
+            // Initialize SSL context and engine for client mode.
+            // Authenticate the server by SHA-256 fingerprint TOFU when a trust
+            // store is configured (Deskflow parity); otherwise fall back to the
+            // platform/system CA trust manager. A client certificate is presented
+            // only when a provider is configured (Deskflow PeerAuth).
             sslContext = SSLContext.getInstance("TLS")
             val sslContext = sslContext!!
-            sslContext.init(null, arrayOf(trustManager), null)
+            val trustManager =
+              if (trustStore != null) {
+                FingerprintTrustManager(host, trustStore)
+              } else {
+                systemDefaultTrustManager()
+              }
+            tlsTrustManager = trustManager
+            sslContext.init(clientCertProvider?.keyManagers(), arrayOf(trustManager), null)
             sslEngine = sslContext.createSSLEngine(host, port)
             val sslEngine = sslEngine!!
             sslEngine.useClientMode = true
+            // System-CA fallback only: also enforce hostname verification. The
+            // fingerprint TOFU path is bound by the host-keyed pin and Deskflow
+            // servers use self-signed certs without host-matching SANs, so HTTPS
+            // verification must NOT be enabled there (it would reject them).
+            if (trustStore == null) {
+              val params = sslEngine.sslParameters
+              params.endpointIdentificationAlgorithm = "HTTPS"
+              sslEngine.sslParameters = params
+            }
 
             sslEngine.beginHandshake()
             val session: SSLSession = sslEngine.session
@@ -262,6 +305,15 @@ class FullDuplexSocket(
             }
         }
       while (!Thread.currentThread().isInterrupted) {
+        // Re-arm OP_WRITE if there is outbound data. Only this (selector) thread
+        // touches interestOps, so there's no race with send() (which only
+        // enqueues + wakes). Once the writable branch drains the queue it clears
+        // OP_WRITE again, so select() can block while idle.
+        val writeKey = channel?.keyFor(sel)
+        if (writeKey != null && writeKey.isValid && outbound.isNotEmpty()) {
+          writeKey.interestOps(writeKey.interestOps() or SelectionKey.OP_WRITE)
+        }
+
         // blocks until an event or wakeup()
         sel.select()
 
@@ -277,11 +329,14 @@ class FullDuplexSocket(
               val sc = key.channel() as SocketChannel
               if (sc.finishConnect()) {
                 if (useTls) {
+                  // Non-blocking handshake (same as the prior working build).
+                  // doHandshake drives the SSLEngine over the non-blocking
+                  // channel; brief UNDERFLOW re-loops are harmless on a LAN.
                   doHandshake(sc, sel)
                 }
-
-                // Now interested in both read and write
-                sc.register(sel, SelectionKey.OP_READ or SelectionKey.OP_WRITE)
+                // Read-only interest; OP_WRITE is armed on demand by the loop
+                // when outbound is non-empty.
+                sc.register(sel, SelectionKey.OP_READ)
                 emit(SocketEvent.ConnectEvent(this))
               }
             }
@@ -365,6 +420,8 @@ class FullDuplexSocket(
                   }
                 }
               }
+              // H4: outbound queue drained — drop OP_WRITE so select() can block.
+              if (outbound.isEmpty()) key.interestOps(SelectionKey.OP_READ)
             }
           }
         }
@@ -398,26 +455,6 @@ class FullDuplexSocket(
       KLoggingManager.logger(FullDuplexSocket::class.java.simpleName)
 
 
-  }
-
-  private class AllCertsTrustManager : X509TrustManager {
-    @Suppress("TrustAllX509TrustManager")
-    override fun checkServerTrusted(
-      chain: Array<X509Certificate>,
-      authType: String,
-    ) {
-
-    }
-
-    @Suppress("TrustAllX509TrustManager")
-    override fun checkClientTrusted(
-      chain: Array<X509Certificate>,
-      authType: String,
-    ) {
-
-    }
-
-    override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf() //
   }
 
 }

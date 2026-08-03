@@ -32,8 +32,6 @@ plugins {
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.kotlin.serialization)
   alias(libs.plugins.protobuf)
-  alias(libs.plugins.hilt)
-  alias(libs.plugins.ksp)
 }
 
 protobuf {
@@ -89,33 +87,6 @@ android {
       )
       buildConfigField("boolean", "DEBUG", "false")
     }
-
-    // applicationVariants.all {
-    //   outputs.all {
-    //     if (this is com.android.build.gradle.api.ApkVariant) {
-    //       val aabOutputFile =
-    //         File(
-    //           outputDirectory,
-    //           "${name}_${versionName}_${versionCode}_${buildType.name}.aab"
-    //         )
-    //       // Check if the task already exists to avoid errors during re-syncs
-    //       if (tasks.findByName("rename${name.capitalize()}Aab") == null) {
-    //         val renameAabTask =
-    // tasks.register("rename${name.capitalize()}Aab") {
-    //           doLast {
-    //             val sourceFile = outputFile
-    //             if (sourceFile.exists()) {
-    //               sourceFile.copyTo(aabOutputFile, overwrite = true)
-    //             } else {
-    //               println("AAB file not found: ${sourceFile.absolutePath}")
-    //             }
-    //           }
-    //         }
-    //         dependsOn(renameAabTask)
-    //       }
-    //     }
-    //   }
-    // }
   }
 
   compileOptions {
@@ -131,6 +102,18 @@ android {
   sourceSets { getByName("main") { proto { srcDir("src/main/proto") } } }
 
   lint { disable.add("NullSafeMutableLiveData") }
+
+  packaging {
+    resources {
+      // BouncyCastle ships multi-release JARs whose OSGI manifests collide;
+      // none are needed at runtime.
+      excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+      excludes += "META-INF/INDEX.LIST"
+      excludes += "META-INF/*.SF"
+      excludes += "META-INF/*.DSA"
+      excludes += "META-INF/*.RSA"
+    }
+  }
 }
 
 dependencies {
@@ -148,11 +131,6 @@ dependencies {
 
   implementation(libs.protobuf.kotlin)
 
-  ksp(libs.hilt.compiler)
-  kspTest(libs.hilt.compiler)
-  implementation(libs.hilt.core)
-  implementation(libs.hilt.android)
-
   implementation(libs.google.accompanist.permissions)
 
   implementation(libs.androidx.core.ktx)
@@ -168,7 +146,6 @@ dependencies {
   implementation(libs.androidx.lifecycle.viewmodel.normal)
   implementation(libs.androidx.lifecycle.viewmodel.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
-  implementation(libs.androidx.hilt.navigation.compose)
   implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.lifecycle.process)
   implementation(libs.androidx.lifecycle.service)
@@ -181,6 +158,13 @@ dependencies {
   implementation(libs.androidx.material3)
 
   implementation(libs.material)
+
+  // BouncyCastle: X.509 self-signed client-cert generation for mTLS (PeerAuth).
+  // The server requires a client certificate; AndroidKeyStore keys can't satisfy
+  // Conscrypt's raw-RSA signing upcall, so we use a software keypair. Not
+  // registered as a JCA provider (used only for cert building).
+  implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+  implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
   implementation(libs.androidx.constraintlayout)
 
   testImplementation(libs.junit)

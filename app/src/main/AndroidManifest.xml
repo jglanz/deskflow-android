@@ -26,10 +26,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission
-            android:name="android.permission.BIND_INPUT_METHOD"
-            tools:ignore="ProtectedPermissions"/>
-
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
@@ -38,8 +34,19 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"  />
     <uses-permission android:name="org.tfv.deskflow.CONNECTION_SERVICE_PERMISSION"/>
+
+    <!-- Declares the custom permission used to gate ConnectionService so only
+         same-signature apps may bind. Previously this permission was only
+         referenced (via <uses-permission>) and never declared, and
+         protectionLevel was wrongly placed on the <service> (ignored), leaving
+         the exported service open to custom-permission squatting. -->
+    <permission
+            android:name="org.tfv.deskflow.CONNECTION_SERVICE_PERMISSION"
+            android:protectionLevel="signature"/>
 
     <queries>
         <intent>
@@ -50,11 +57,12 @@
 
     <application
             android:name=".Application"
-            android:allowBackup="true"
+            android:allowBackup="false"
             android:dataExtractionRules="@xml/data_extraction_rules"
             android:fullBackupContent="@xml/backup_rules"
             android:icon="@mipmap/ic_launcher"
             android:label="@string/app_name"
+            android:networkSecurityConfig="@xml/network_security_config"
             android:theme="@style/Theme.DeskflowKM"
     >
 
@@ -83,10 +91,9 @@
         <service
                 android:name=".services.ConnectionService"
                 android:exported="true"
+                android:foregroundServiceType="connectedDevice"
                 android:permission="org.tfv.deskflow.CONNECTION_SERVICE_PERMISSION"
-                android:protectionLevel="signature"
         >
-<!--            android:process=":connection" -->
             <intent-filter>
                 <action android:name="org.tfv.deskflow.services.ConnectionService" />
             </intent-filter>

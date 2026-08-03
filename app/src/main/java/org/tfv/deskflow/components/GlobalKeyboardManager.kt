@@ -27,13 +27,13 @@ package org.tfv.deskflow.components
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import androidx.annotation.RawRes
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
@@ -64,7 +64,15 @@ open class GlobalKeyboardManager(
 
   protected val executor = SingletonThreadExecutor(javaClass.simpleName)
 
-  protected val editableActionFlow = MutableSharedFlow<GlobalKeyboardAction>()
+  // A buffer is required so tryEmit() (called from the executor thread) does not
+  // silently drop an action when the sole collector is briefly busy running a
+  // previous action (e.g. clickFocused traversing the a11y node tree).
+  protected val editableActionFlow =
+    MutableSharedFlow<GlobalKeyboardAction>(
+      replay = 0,
+      extraBufferCapacity = 16,
+      onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
 
   val actionFlow: SharedFlow<GlobalKeyboardAction> =
     editableActionFlow.asSharedFlow()
@@ -144,7 +152,7 @@ open class GlobalKeyboardManager(
 
     log.debug { "Emitting action($action)" }
 
-    runBlocking { editableActionFlow.emit(action) }
+    editableActionFlow.tryEmit(action)
   }
 
   open fun process(event: KeyboardEvent) {
@@ -184,9 +192,13 @@ open class GlobalKeyboardManager(
       for (actionIdx in 0..<jsonActionDefaults.size) {
         val jsonAction = jsonActionDefaults[actionIdx].jsonObject
 
-        val actionId =
-          jsonAction["actionId"]!!.jsonPrimitive.intOrNull
-            ?: throw Error("Missing actionId")
+        val actionId = jsonAction["actionId"]?.jsonPrimitive?.intOrNull
+        if (actionId == null) {
+          log.warn {
+            "Skipping keyboard action at index $actionIdx: missing or invalid 'actionId' in entry $jsonAction"
+          }
+          continue
+        }
         val label =
           jsonAction["label"]!!.jsonPrimitive.content.apply {
             require(isNotBlank()) { "Missing label" }

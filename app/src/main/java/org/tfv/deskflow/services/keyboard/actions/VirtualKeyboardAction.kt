@@ -58,7 +58,7 @@ val editActionCopy: VirtualKeyboardActionCallable =
   { ic, et, specialKey, mods, event, editHistory, service ->
     if (et.selectionStart != et.selectionEnd) {
       val selectedText = et.text.subSequence(et.selectionStart, et.selectionEnd)
-      log.debug { "Copying selected text: $selectedText" }
+      log.debug { "Copying selected text (len=${selectedText.length})" }
       service.setClipboardText(selectedText)
     } else {
       log.warn { "No text selected to copy" }
@@ -69,7 +69,7 @@ val editActionCut: VirtualKeyboardActionCallable =
   { ic, et, specialKey, mods, event, editHistory, service ->
     if (et.selectionStart != et.selectionEnd) {
       val selectedText = et.text.subSequence(et.selectionStart, et.selectionEnd)
-      log.debug { "Cutting selected text: $selectedText" }
+      log.debug { "Cutting selected text (len=${selectedText.length})" }
       service.setClipboardText(selectedText)
       ic.deleteSurroundingText(et.selectionEnd - et.selectionStart, 0)
       service.saveEditHistory(
@@ -85,7 +85,7 @@ val editActionPaste: VirtualKeyboardActionCallable =
   { ic, et, specialKey, mods, event, editHistory, service ->
     val cbText = service.getClipboardText()
     if (cbText != null) {
-      log.debug { "Pasting clipboard text: $cbText" }
+      log.debug { "Pasting clipboard text (len=${cbText.length})" }
       ic.commitText(cbText, 1)
       service.saveEditHistory(
         service.editorInfo,

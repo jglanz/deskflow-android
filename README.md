@@ -25,19 +25,22 @@ A **near** fully functional [Deskflow (deskflow.org)](https://deskflow.org) clie
 
 ## Features & Limitations
 
-- Shortcuts & Hotkeys  
-  - App Switching (`Command+Tab` or `Alt+Tab`)
-  - Arrow keys for general navigation
-  - `Escape` for `Back` functionality
-  - +++
+- Mouse input
+  - Pointer movement, left / right / middle click
+  - **Wheel scrolling** (vertical, plus horizontal tilt)
+  - **Back button** triggers system Back
+- Keyboard
+  - Shortcuts & hotkeys: app switching (`Command+Tab` / `Alt+Tab`), arrow-key navigation, `Escape` for Back
+  - **Volume keys** (up / down / mute) control the device volume
+- **Configurable pointer speed** slider (in Settings)
 - Clipboard integration
   - Text (of any kind) is supported
   - __Bitmap is **NOT** supported currently, but is next on the list__
-- Simple gesture support 
+- Simple gesture support
   - Pull down on the status bar
   - Pull up for all apps, etc
-- **Content Scrolling is not functional with gestures or click & drag, BUT arrow keys in many apps will work.**
-- **IMPORTANT: TLS is Supported, but individual client certificates are not.**  
+- **Mouse-wheel scrolling works. Gesture or click-and-drag scrolling is limited, though arrow keys work in many apps.**
+- **TLS is supported with SHA-256 fingerprint trust-on-first-use, and client certificates (PeerAuth / mutual TLS) are supported.** See [TLS/SSL Security](#tlsssl-security).
 
 ## Installation
 
@@ -64,9 +67,19 @@ is the TLS configuration, described below.
 
 #### TLS/SSL Security
 
-TLS is supported, but individual client certificates are not.
+TLS is supported. The client authenticates the server with **SHA-256 fingerprint
+trust-on-first-use (TOFU)**: on the first successful connection the server
+certificate's fingerprint is pinned, and any later mismatch is rejected (which
+would indicate a man-in-the-middle or a changed server certificate).
 
-> **IMPORTANT**: TLS is Supported, but individual client certificates are not as shown in the screenshot below.
+For servers configured with **PeerAuth** (mutual TLS), the client also presents
+its own self-signed certificate. The app generates this certificate
+automatically on the first TLS connection. Its fingerprint is shown on the
+Settings screen so you can register it on the server: append
+`v2:sha256:<fingerprint>` to the server's `tls/trusted-clients` file and restart
+`deskflow-core` so the new entry is loaded.
+
+> The screenshot below shows the server-side TLS configuration in the Deskflow desktop app.
 
 ![Config Screenshot](docs/assets/screenshots/screenshot_tls_config.png)
 
@@ -87,6 +100,7 @@ The only configuration information required is:
 - `Screen Name` the name you configured in the Deskflow Server.
 - `Host` & `Port` of your Deskflow Server.
 - `Use TLS` if your Deskflow Server is configured for TLS.
+- `Pointer speed` adjusts how far the on-screen pointer moves relative to the mouse (1.0x tracks the server exactly; lower is slower and more precise, higher is faster).
 
 Press `Save` to save your configuration and return to the home screen.
 

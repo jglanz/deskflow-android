@@ -20,7 +20,23 @@ on:
       - 'v**'
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Run tests and lint
+        run: ./gradlew :client:test :app:lintDebug
+
   release-bundle:
+    needs: verify
     runs-on: ubuntu-latest
     environment: DeskflowAndroid
     steps:
@@ -70,17 +86,9 @@ jobs:
           tag_name: ${{ env.tag_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-#
-#      - name: Upload to Google Play
-#        uses: r0adkll/upload-google-play@v1
-#        with:
-#          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-#          packageName: org.tfv.deskflow
-#          releaseFiles: ${{ steps.sign_aab.outputs.signedReleaseFile }}
-#          track: alpha
-#          status: completed
 
   release-apk:
+    needs: verify
     runs-on: ubuntu-latest
     environment: DeskflowAndroid
     steps:

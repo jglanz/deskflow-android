@@ -27,17 +27,26 @@ import java.io.DataInputStream
 import java.io.IOException
 
 @Throws(IOException::class)
-fun DataInputStream.readString(length: Int = 4): String {
-
-    // Read in the bytes and convert to a string
+fun DataInputStream.readString(): String {
+    // Faithful inverse of DataOutputStreamExt.writeString():
+    // 4-byte big-endian length prefix followed by exactly that many UTF-8 bytes.
+    val length = readInt()
     val stringBytes = ByteArray(length)
-    read(stringBytes, 0, stringBytes.size)
-    return String(stringBytes)
+    readFully(stringBytes)
+    return String(stringBytes, Charsets.UTF_8)
+}
+
+@Throws(IOException::class)
+fun DataInputStream.readFixedString(length: Int): String {
+    // Read a fixed number of bytes (no length prefix) and decode as UTF-8.
+    val stringBytes = ByteArray(length)
+    readFully(stringBytes)
+    return String(stringBytes, Charsets.UTF_8)
 }
 
 @Throws(IOException::class)
 fun DataInputStream.readExpectedString(expectedString: String): String {
-    val str = readString(expectedString.length)
+    val str = readFixedString(expectedString.length)
 
     require(str == expectedString) {
         "Expected string $expectedString not found.  Found: $str"

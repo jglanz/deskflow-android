@@ -28,7 +28,6 @@
 package org.tfv.deskflow.ext
 
 import android.accessibilityservice.AccessibilityService
-import android.annotation.SuppressLint
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -194,8 +193,6 @@ inline fun <reified T : Service> Context.sendServiceConnectionEvent() {
 }
 
 const val DESKFLOW_PACKAGE = "org.tfv.deskflow"
-const val DESKFLOW_IME_ID =
-  "$DESKFLOW_PACKAGE/$DESKFLOW_PACKAGE.services.VirtualKeyboardService"
 
 fun Context.launchInputMethodServiceSettings() {
   val intent =
@@ -203,38 +200,6 @@ fun Context.launchInputMethodServiceSettings() {
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
   startActivity(intent)
-}
-
-@SuppressLint("ObsoleteSdkInt")
-fun Context.enabledInputMethodServicesFromSettings(): List<String> {
-  if (android.os.Build.VERSION.SDK_INT > 33) return emptyList()
-  try {
-
-    val enabledList =
-      Settings.Secure.getString(
-        contentResolver,
-        Settings.Secure.ENABLED_INPUT_METHODS,
-      ) ?: return emptyList()
-
-    // the list is colon-separated
-    return enabledList.split(':')
-  } catch (err: Exception) {
-    log.warn(err) { "Failed to get enabled IME list" }
-    return emptyList()
-  }
-}
-
-/**
- * @param imeId full ID of your IME, e.g.
- *   "com.example.myime/.MyInputMethodService"
- */
-fun Context.isInputMethodServiceEnabledFromSettings(
-  imeId: String = DESKFLOW_IME_ID
-): Boolean {
-  val enabledIMESettings = enabledInputMethodServicesFromSettings()
-  if (!enabledIMESettings.isEmpty())
-    return enabledIMESettings.any { it.trim() == imeId }
-  return false
 }
 
 fun Context.allInputMethodServices(): List<InputMethodInfo> {
@@ -254,8 +219,7 @@ fun Context.isInputMethodServiceEnabled(
   imePackage: String = DESKFLOW_PACKAGE
 ): Boolean {
   return catch({
-    enabledInputMethodServices().any { it.packageName == imePackage } ||
-      isInputMethodServiceEnabledFromSettings()
+    enabledInputMethodServices().any { it.packageName == imePackage }
   }) { err: Exception ->
     log.warn(err) { "Failed to check if IME is enabled" }
     false

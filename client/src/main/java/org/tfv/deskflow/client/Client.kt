@@ -36,14 +36,19 @@ import org.tfv.deskflow.client.models.ClipboardData
 import org.tfv.deskflow.client.models.SERVER_DEFAULT_ADDRESS
 import org.tfv.deskflow.client.models.ServerTarget
 import org.tfv.deskflow.client.net.FullDuplexSocket
+import org.tfv.deskflow.client.net.tls.ClientCertificateProvider
+import org.tfv.deskflow.client.net.tls.ServerTrustStore
 import org.tfv.deskflow.client.util.AbstractDisposable
 import org.tfv.deskflow.client.util.SingletonThreadExecutor
 import org.tfv.deskflow.client.util.disposeOf
 import org.tfv.deskflow.client.util.logging.KLoggingManager
 
-class Client() : AbstractDisposable() {
+class Client(
+  private val trustStore: ServerTrustStore? = null,
+  private val clientCertProvider: ClientCertificateProvider? = null,
+) : AbstractDisposable() {
 
-  private var socket: FullDuplexSocket? = null
+  @Volatile private var socket: FullDuplexSocket? = null
 
   var isEnabled: Boolean = true
     private set
@@ -85,6 +90,7 @@ class Client() : AbstractDisposable() {
     connectionExecutor.scheduleWithFixedDelay(
       delay = 1000L,
       runnable = {
+        if (isDisposed) return@scheduleWithFixedDelay
         catch({
           when {
             !isEnabled -> {
@@ -110,7 +116,7 @@ class Client() : AbstractDisposable() {
   }
 
   private val messageParser = MessageParser()
-  private var messageHandler: MessageHandler? = null
+  @Volatile private var messageHandler: MessageHandler? = null
 
   val isConnected: Boolean
     get() = socket?.isConnected ?: false
@@ -143,6 +149,7 @@ class Client() : AbstractDisposable() {
   }
 
   private fun connect() {
+    if (isDisposed) return
     if (!connectionExecutor.isExecutorThread) {
       log.warn { "Connect called from non-executor thread, scheduling" }
       connectionExecutor.submit { connect() }
@@ -162,7 +169,14 @@ class Client() : AbstractDisposable() {
     }
 
     try {
-      val socket = FullDuplexSocket(target.address, target.port, target.useTls)
+      val socket =
+        FullDuplexSocket(
+          target.address,
+          target.port,
+          target.useTls,
+          trustStore,
+          clientCertProvider,
+        )
       messageHandler = MessageHandler(socket, target)
 
       this.socket = socket
@@ -242,7 +256,32 @@ class Client() : AbstractDisposable() {
 
   /** Cleanup */
   override fun onDispose() {
-    disconnect()
+    // isDisposed is already true here (AbstractDisposable.dispose sets it before
+    // calling onDispose), so connect()/scheduleConnectionCheck bail out. Dispose
+    // the socket + handler directly (disconnect() only re-submits to the executor
+    // when called off-thread, which dispose always is) and shut the recurring
+    // connection-check executor down so the Client frees its thread instead of
+    // leaking it and reconnecting forever.
+    //
+    // The socket stop (thread.join) and MessageHandler teardown
+    // (awaitTermination) can block for seconds, and ConnectionService.onDestroy
+    // invokes this on the MAIN thread — so run that heavy work on a daemon
+    // thread and return promptly (no ANR). Client is being discarded, so async
+    // teardown is safe; isDisposed already guards all writers.
+    val socketRef = socket
+    val handlerRef = messageHandler
+    socket = null
+    messageHandler = null
+    Thread(
+        {
+          disposeOf(socketRef)
+          disposeOf(handlerRef)
+          connectionExecutor.shutdown()
+        },
+        "DeskflowClientTeardown",
+      )
+      .apply { isDaemon = true }
+      .start()
 
     ClientEventBus.off(this::onClientEvent)
   }

@@ -34,14 +34,9 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
 import android.os.IBinder
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import org.tfv.deskflow.client.events.ClientEvent
 import org.tfv.deskflow.client.events.KeyboardEvent
@@ -57,6 +52,7 @@ import org.tfv.deskflow.data.aidl.Result
 import org.tfv.deskflow.data.aidl.ScreenState
 import org.tfv.deskflow.data.aidl.ServerState
 import org.tfv.deskflow.ext.ConnectionStateDefaults
+import org.tfv.deskflow.ext.copy
 import org.tfv.deskflow.logging.LogRecordEvent
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -68,7 +64,6 @@ class ConnectionServiceClient(
   companion object {
     private val log = KLoggingManager.logger(ConnectionServiceClient::class)
   }
-  private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
   private val stateEditableFlow = MutableStateFlow(ConnectionStateDefaults(ctx))
   private val logRecordsEditableFlow = MutableStateFlow(emptyList<LogRecordEvent>())
@@ -90,10 +85,8 @@ class ConnectionServiceClient(
   }
 
   val stateFlow: StateFlow<ConnectionState> = stateEditableFlow.asStateFlow()
-    .stateIn(stateScope,SharingStarted.Companion.Eagerly, stateEditableFlow.value)
 
   val logRecordsFlow: StateFlow<List<LogRecordEvent>> = logRecordsEditableFlow.asStateFlow()
-    .stateIn(stateScope,SharingStarted.Companion.Eagerly, logRecordsEditableFlow.value)
 
   fun addLogRecord(logRecord: LogRecordEvent) {
     logRecordsEditableFlow.update { current ->
@@ -187,13 +180,20 @@ class ConnectionServiceClient(
       connectionService?.registerCallback(connectionServiceCallback)
 
       connectionService?.state?.let {
-        log.debug { "Initial connection state: $state" }
+        log.debug { "Initial connection state: $it" }
         stateEditableFlow.value = it
       }
     }
 
     override fun onServiceDisconnected(name: ComponentName?) {
       connectionService = null
+      stateEditableFlow.update { current ->
+        current.copy(
+          isConnected = false,
+          ackReceived = false,
+          screen = current.screen.copy(isActive = false)
+        )
+      }
     }
   }
 

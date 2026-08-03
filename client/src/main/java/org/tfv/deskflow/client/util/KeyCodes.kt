@@ -54,7 +54,15 @@ object Keyboard {
     PageUp(0xEF55),
     PageDown(0xEF56),
     End(0xEF57),   /* EOL */
-    Begin(0xEF58); /* BOL */
+    Begin(0xEF58), /* BOL */
+
+    // Audio / media keys. These are the Deskflow wire KeyIDs (KeyTypes.h
+    // kKeyAudio*); the server translates platform-native volume keys (X11
+    // XF86Audio*, Windows VK_VOLUME_*, macOS) into these 16-bit values before
+    // transmission, so they fit the %2i key field verbatim.
+    VolumeMute(0xE0AD),
+    VolumeDown(0xE0AE),
+    VolumeUp(0xE0AF);
 
     val label: String = name
   }

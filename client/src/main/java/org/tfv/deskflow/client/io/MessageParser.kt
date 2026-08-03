@@ -26,6 +26,7 @@ package org.tfv.deskflow.client.io
 
 import org.tfv.deskflow.client.util.logging.KLoggingManager
 import org.tfv.deskflow.client.io.MessageTemplate.Companion.templateFromPrefix
+import org.tfv.deskflow.client.io.msgs.InvalidMessageException
 import org.tfv.deskflow.client.io.msgs.Message
 import kotlin.reflect.full.createInstance
 
@@ -55,21 +56,50 @@ class MessageParser() {
 
                 pendingMessageSize = inputStream.readInt()
                 availableSize -= Int.SIZE_BYTES
+
+                // readInt() is signed big-endian, so a malicious/buggy server
+                // controls both the sign and magnitude of the frame size. Reject
+                // non-positive or absurdly large values before they drive
+                // pop()/accumulation.
+                if (pendingMessageSize <= 0 || pendingMessageSize > MAX_MESSAGE_SIZE) {
+                    val badSize = pendingMessageSize
+                    log.error {
+                        "Invalid message size $badSize (cap=$MAX_MESSAGE_SIZE); " +
+                            "resetting parser and closing connection"
+                    }
+                    pendingMessageSize = 0
+                    buffer.reset()
+                    throw InvalidMessageException("Invalid message size: $badSize")
+                }
             }
 
             if (availableSize < pendingMessageSize) {
                 break
             }
 
-            val messageData = buffer.pop(pendingMessageSize)
-            pendingMessageSize = 0
+            try {
+                val messageData = buffer.pop(pendingMessageSize)
+                pendingMessageSize = 0
 
-            val message = parseMessage(messageData)
-            if (message == null) {
-                log.warn { "Error parsing message of size ${messageData.size}" }
-                continue
+                val message = parseMessage(messageData)
+                if (message == null) {
+                    log.warn { "Error parsing message of size ${messageData.size}" }
+                    continue
+                }
+                msgList.add(message)
+            } catch (err: Exception) {
+                // One malformed frame must not crash the receive thread. Reset
+                // parser state and rethrow as a connection-level error so the
+                // socket run loop closes the connection cleanly rather than
+                // letting an IllegalArgumentException (or similar) escape.
+                log.error(err) {
+                    "Failed to parse frame of size $pendingMessageSize; " +
+                        "resetting parser and closing connection"
+                }
+                pendingMessageSize = 0
+                buffer.reset()
+                throw InvalidMessageException("Malformed message frame: ${err.message}")
             }
-            msgList.add(message)
 
         }
 
@@ -113,6 +143,8 @@ class MessageParser() {
 
 
     companion object {
+
+        const val MAX_MESSAGE_SIZE = 4 * 1024 * 1024
 
         	private val log = KLoggingManager.logger(MessageParser::class.java.simpleName)
 
