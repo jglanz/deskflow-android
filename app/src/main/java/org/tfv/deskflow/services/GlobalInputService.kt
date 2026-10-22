@@ -24,6 +24,9 @@
 
 package org.tfv.deskflow.services
 
+import android.media.AudioManager
+import android.provider.Settings
+import android.widget.Toast
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
@@ -45,6 +48,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
@@ -61,12 +65,16 @@ import arrow.core.raise.catch
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.pow
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.tfv.deskflow.R
 import org.tfv.deskflow.client.events.KeyboardEvent
 import org.tfv.deskflow.client.events.MouseEvent
 import org.tfv.deskflow.client.events.ScreenEvent
+import org.tfv.deskflow.client.util.Keyboard
 import org.tfv.deskflow.client.models.ClipboardData
 import org.tfv.deskflow.client.util.logging.KLoggingManager
 import org.tfv.deskflow.components.GlobalKeyboardManager
@@ -421,7 +429,93 @@ class GlobalInputService : AccessibilityService() {
    */
   private fun onKeyboardEvent(event: KeyboardEvent) {
     log.debug { "onKeyboardEvent: $event" }
+    if (handleSystemKey(event)) return
     keyboardManager.process(event)
+  }
+
+  /**
+   * Volume, media and brightness keys from the server control this device.
+   * Returns true when the event was one of those keys.
+   */
+  private fun handleSystemKey(event: KeyboardEvent): Boolean {
+    val key = Keyboard.findSpecialKey(event.id.toInt()) ?: return false
+    val mediaKeyCode =
+      when (key) {
+        Keyboard.SpecialKey.AudioPlay -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+        Keyboard.SpecialKey.AudioNext -> KeyEvent.KEYCODE_MEDIA_NEXT
+        Keyboard.SpecialKey.AudioPrev -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+        Keyboard.SpecialKey.AudioStop -> KeyEvent.KEYCODE_MEDIA_STOP
+        else -> null
+      }
+    if (mediaKeyCode != null) {
+      // Forward both down and up so the media session sees a full press;
+      // auto-repeat would toggle play/pause over and over, so drop it.
+      if (event.type == KeyboardEvent.Type.Repeat) return true
+      val action =
+        if (event.type == KeyboardEvent.Type.Up) KeyEvent.ACTION_UP
+        else KeyEvent.ACTION_DOWN
+      audioManager.dispatchMediaKeyEvent(KeyEvent(action, mediaKeyCode))
+      return true
+    }
+
+    val audioAdjust =
+      when (key) {
+        Keyboard.SpecialKey.AudioUp -> AudioManager.ADJUST_RAISE
+        Keyboard.SpecialKey.AudioDown -> AudioManager.ADJUST_LOWER
+        Keyboard.SpecialKey.AudioMute -> AudioManager.ADJUST_TOGGLE_MUTE
+        Keyboard.SpecialKey.BrightnessUp,
+        Keyboard.SpecialKey.BrightnessDown -> null
+        else -> return false
+      }
+    // Act on key down and auto-repeat; the matching up event is swallowed.
+    if (event.type == KeyboardEvent.Type.Up) return true
+
+    if (audioAdjust != null) {
+      audioManager.adjustSuggestedStreamVolume(
+        audioAdjust,
+        AudioManager.USE_DEFAULT_STREAM_TYPE,
+        AudioManager.FLAG_SHOW_UI,
+      )
+    } else {
+      adjustBrightness(up = key == Keyboard.SpecialKey.BrightnessUp)
+    }
+    return true
+  }
+
+  private fun adjustBrightness(up: Boolean) {
+    if (!Settings.System.canWrite(this)) {
+      log.warn { "WRITE_SETTINGS not granted, cannot change brightness" }
+      Toast.makeText(
+          this,
+          "Allow \"Modify system settings\" for Deskflow to change brightness",
+          Toast.LENGTH_LONG,
+        )
+        .show()
+      return
+    }
+
+    val resolver = contentResolver
+    Settings.System.putInt(
+      resolver,
+      Settings.System.SCREEN_BRIGHTNESS_MODE,
+      Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL,
+    )
+    val current =
+      Settings.System.getInt(resolver, Settings.System.SCREEN_BRIGHTNESS, 128)
+    // Step on a square-root scale so steps feel even to the eye.
+    val steps = 16
+    val level = Math.round(sqrt(current / 255.0) * steps).toInt()
+    val newLevel = (level + if (up) 1 else -1).coerceIn(1, steps)
+    val value =
+      (newLevel.toDouble() / steps).pow(2).times(255).roundToInt().coerceIn(1, 255)
+    Settings.System.putInt(resolver, Settings.System.SCREEN_BRIGHTNESS, value)
+    log.debug { "Brightness $current -> $value" }
+    Toast.makeText(this, "Brightness ${newLevel * 100 / steps}%", Toast.LENGTH_SHORT)
+      .show()
+  }
+
+  private val audioManager by lazy {
+    getSystemService(AUDIO_SERVICE) as AudioManager
   }
 
   /**

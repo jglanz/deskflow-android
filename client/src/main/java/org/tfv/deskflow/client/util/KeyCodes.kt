@@ -45,6 +45,17 @@ object Keyboard {
     Hanja(0xEF34),            /* Hanja */
     Delete(0xEFFF),           /* Delete, rubout */
 
+    // media / hardware keys
+    AudioMute(0xE0AD),
+    AudioDown(0xE0AE),
+    AudioUp(0xE0AF),
+    AudioNext(0xE0B0),
+    AudioPrev(0xE0B1),
+    AudioStop(0xE0B2),
+    AudioPlay(0xE0B3),
+    BrightnessDown(0xE0B8),
+    BrightnessUp(0xE0B9),
+
     // cursor control
     Home(0xEF50),
     Left(0xEF51),  /* Move left, left arrow */
