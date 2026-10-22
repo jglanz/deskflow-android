@@ -34,6 +34,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.ExtractedText
 import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
+import android.widget.Toast
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.MutableWindowInsets
@@ -64,11 +65,13 @@ import arrow.core.raise.catch
 import org.tfv.deskflow.Application
 import org.tfv.deskflow.R
 import org.tfv.deskflow.client.events.KeyboardEvent
+import org.tfv.deskflow.client.models.keys.KeyModifierMask
 import org.tfv.deskflow.client.util.Keyboard
 import org.tfv.deskflow.client.util.Keyboard.findModifierKey
 import org.tfv.deskflow.client.util.Keyboard.findSpecialKey
 import org.tfv.deskflow.client.util.logging.KLoggingManager
 import org.tfv.deskflow.components.GlobalKeyboardManager.Companion.loadKeyboardActions
+import org.tfv.deskflow.services.keyboard.HangulComposer
 import org.tfv.deskflow.services.keyboard.KeyboardEditHistory
 import org.tfv.deskflow.services.keyboard.actions.VirtualKeyboardAction
 import org.tfv.deskflow.types.EditorKeyboardAction
@@ -145,6 +148,11 @@ class VirtualKeyboardService : InputMethodService() {
 
   private val editHistoryMap = mutableMapOf<String, KeyboardEditHistory>()
 
+  /** Hangul input mode, toggled with the Hangul (or right Alt) key. */
+  private var hangulMode = false
+
+  private val hangul = HangulComposer()
+
   private fun getCurrentPackage(info: EditorInfo? = editorInfo): String? =
     info?.packageName
 
@@ -199,6 +207,16 @@ class VirtualKeyboardService : InputMethodService() {
       candidatesStart,
       candidatesEnd,
     )
+
+    // The cursor moved away from the composing syllable (e.g. a tap), so
+    // drop the composition the same way other IMEs do.
+    if (
+      hangul.isComposing &&
+        (candidatesEnd == -1 || newSelStart != candidatesEnd)
+    ) {
+      currentInputConnection?.finishComposingText()
+      hangul.reset()
+    }
 
     logCurrentImeState(
       "onUpdateSelection(oldSelStart=$oldSelStart, oldSelEnd=$oldSelEnd, newSelStart=$newSelStart, newSelEnd=$newSelEnd, candidatesStart=$candidatesStart, candidatesEnd=$candidatesEnd)"
@@ -269,10 +287,12 @@ class VirtualKeyboardService : InputMethodService() {
   }
 
   override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
+    hangul.reset()
     keyboardViewLifecycleOwner.onResume()
   }
 
   override fun onFinishInputView(finishingInput: Boolean) {
+    finishHangul(currentInputConnection)
     keyboardViewLifecycleOwner.onPause()
   }
 
@@ -373,6 +393,50 @@ class VirtualKeyboardService : InputMethodService() {
    *
    * @param event The keyboard event to handle.
    */
+  private fun toggleHangulMode(ic: InputConnection) {
+    finishHangul(ic)
+    hangulMode = !hangulMode
+    log.debug { "Hangul mode: $hangulMode" }
+    Toast.makeText(
+        this,
+        if (hangulMode) "한글" else "English",
+        Toast.LENGTH_SHORT,
+      )
+      .show()
+  }
+
+  private fun finishHangul(ic: InputConnection?) {
+    if (!hangul.isComposing) return
+    ic?.finishComposingText()
+    hangul.reset()
+  }
+
+  /** Returns true when the key was consumed by Hangul composition. */
+  private fun handleHangulKey(
+    ic: InputConnection,
+    id: Int,
+    mods: KeyModifierMask,
+  ): Boolean {
+    if (mods.isControl || mods.isAlt || mods.isMeta || mods.isSuper) {
+      return false
+    }
+
+    if (id == Keyboard.SpecialKey.BackSpace.code) {
+      if (!hangul.backspace()) return false
+      ic.setComposingText(hangul.composing, 1)
+      return true
+    }
+
+    if (id !in 0x20..0x7E) return false
+    val jamo = hangul.jamoFor(id.toChar(), mods.isShift) ?: return false
+    val result = hangul.input(jamo)
+    ic.beginBatchEdit()
+    if (result.commit.isNotEmpty()) ic.commitText(result.commit, 1)
+    ic.setComposingText(result.composing, 1)
+    ic.endBatchEdit()
+    return true
+  }
+
   private fun onKeyboardEvent(event: KeyboardEvent) {
     // 1. Check if we have a valid input connection.
     val ic = currentInputConnection
@@ -398,16 +462,29 @@ class VirtualKeyboardService : InputMethodService() {
     // 4. Get the key ID and check if it's a modifier or special key.
     val id = event.id.toInt()
 
+    if (
+      id == Keyboard.SpecialKey.Hangul.code ||
+        id == Keyboard.ModifierKey.AltRight.code
+    ) {
+      toggleHangulMode(ic)
+      return
+    }
+
     val modifierKey = findModifierKey(id)
     if (modifierKey != null) {
       return
     }
+
+    val mods = event.getModifiers()
+    if (hangulMode && handleHangulKey(ic, id, mods)) {
+      return
+    }
+    finishHangul(ic)
     val specialKey = findSpecialKey(id)
 
     // 5. If all the previous checks passed, grab the current `ExtractedText` of
     // the `InputConnection`.
     val et = ic.getExtractedText(ExtractedTextRequest(), 0)
-    val mods = event.getModifiers()
     val editHistory = getEditHistory()
 
     when {
