@@ -40,12 +40,14 @@ import android.content.pm.PackageManager
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.RectF
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
 import android.view.accessibility.AccessibilityEvent
@@ -59,8 +61,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import arrow.core.raise.catch
 import kotlin.concurrent.atomics.AtomicBoolean
-import kotlin.math.abs
-import kotlin.math.max
+import kotlin.math.min
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.tfv.deskflow.R
@@ -150,11 +151,13 @@ class GlobalInputService : AccessibilityService() {
       override fun onCompleted(gestureDescription: GestureDescription) {
         super.onCompleted(gestureDescription)
         globalInputPending = false
+        scrollAtPointer(0, 0)
       }
 
       override fun onCancelled(gestureDescription: GestureDescription) {
         super.onCancelled(gestureDescription)
         globalInputPending = false
+        scrollAtPointer(0, 0)
       }
     }
 
@@ -523,9 +526,8 @@ class GlobalInputService : AccessibilityService() {
       }
 
       MouseEvent.Type.Wheel -> {
-        if (abs(event.y) < 240) return
         log.debug { "Wheel [${event.x}, ${event.y}]" }
-        swipe(up = event.y > 0)
+        scrollAtPointer(event.x, event.y)
       }
     }
   }
@@ -661,59 +663,68 @@ class GlobalInputService : AccessibilityService() {
     // Required override.
   }
 
+  /** Wheel deltas not yet turned into a scroll; one notch is [WHEEL_NOTCH]. */
+  private var pendingWheelX = 0
+  private var pendingWheelY = 0
+
   /**
-   * Perform a swipe gesture. If [up] is true, it swipes up, otherwise it swipes
-   * down. The swipe starts from the middle of the screen and goes to the top or
-   * bottom.
-   * > Example: Used for scrolling in lists or returning to the home screen.
+   * Scroll the view under the pointer with a short drag, like a touchpad: wheel
+   * up drags the content down. Each notch moves a fixed distance, and notches
+   * that arrive while a drag is running are folded into the next one. The drag
+   * stays clear of the status bar and the gesture-navigation areas so it never
+   * triggers home, back or the notification shade.
    */
-  private fun swipe(up: Boolean = false) {
+  private fun scrollAtPointer(dx: Int, dy: Int) {
+    pendingWheelX += dx
+    pendingWheelY += dy
     if (globalInputPending) return
 
-    globalInputPending = true
+    val notchesX = pendingWheelX / WHEEL_NOTCH
+    val notchesY = pendingWheelY / WHEEL_NOTCH
+    if (notchesX == 0 && notchesY == 0) return
+    pendingWheelX -= notchesX * WHEEL_NOTCH
+    pendingWheelY -= notchesY * WHEEL_NOTCH
 
-    val screenSize = getScreenSize()
+    val metrics = windowManager.currentWindowMetrics
+    val bounds = metrics.bounds
+    val insets =
+      metrics.windowInsets.getInsets(
+        WindowInsets.Type.systemBars() or WindowInsets.Type.systemGestures()
+      )
+    val margin = SCROLL_EDGE_MARGIN_PX
+    val area =
+      RectF(
+        (bounds.left + insets.left + margin).toFloat(),
+        (bounds.top + insets.top + margin).toFloat(),
+        (bounds.right - insets.right - margin).toFloat(),
+        (bounds.bottom - insets.bottom - margin).toFloat(),
+      )
+    if (area.isEmpty) return
 
-    val (width, height) =
-      Pair(screenSize.px.width.toFloat(), screenSize.px.height.toFloat())
-    val middleX = width / 2f
-
-    val (startY, endY) =
-      when {
-        up && isHomeScreenActive -> {
-          Pair(
-            mousePointerLayout.y.toFloat(),
-            max(mousePointerLayout.y.toFloat() - (height * 0.42f), 0f),
-          )
-        }
-
-        up -> {
-          Pair(height - 5f, height * 0.42f)
-        }
-
-        else -> {
-          Pair(
-            mousePointerLayout.y.toFloat(),
-            mousePointerLayout.y.toFloat() + (height * 0.5f),
-          )
-        }
-      }
+    val step = min(bounds.width(), bounds.height()) * SCROLL_STEP_FRACTION
+    val startX = mousePointerLayout.x.toFloat().coerceIn(area.left, area.right)
+    val startY = mousePointerLayout.y.toFloat().coerceIn(area.top, area.bottom)
+    val endX = (startX - notchesX * step).coerceIn(area.left, area.right)
+    val endY = (startY + notchesY * step).coerceIn(area.top, area.bottom)
+    if (startX == endX && startY == endY) return
 
     val path =
       Path().apply {
-        moveTo(middleX, startY)
-        lineTo(middleX, endY)
+        moveTo(startX, startY)
+        lineTo(endX, endY)
       }
-
-    val stroke = StrokeDescription(path, 0, 500)
-
-    val gesture = GestureDescription.Builder().addStroke(stroke).build()
+    val gesture =
+      GestureDescription.Builder()
+        .addStroke(StrokeDescription(path, 0, SCROLL_DURATION_MS))
+        .build()
 
     log.debug {
-      "Swipe up=$up,startY=$startY,endY=$endY,screenSize=$screenSize,path=$path"
+      "Scroll notches=($notchesX,$notchesY) from ($startX,$startY) to ($endX,$endY)"
     }
-
-    dispatchGesture(gesture, gestureResultCallback, globalInputHandler)
+    globalInputPending = true
+    if (!dispatchGesture(gesture, gestureResultCallback, globalInputHandler)) {
+      globalInputPending = false
+    }
   }
 
   /**
@@ -769,6 +780,19 @@ class GlobalInputService : AccessibilityService() {
 
   companion object {
     private const val CHANNEL_ID = "deskflow_service_channel"
+
+    /** Wheel delta of one mouse-wheel notch, as sent by Deskflow. */
+    private const val WHEEL_NOTCH = 120
+
+    /** Scroll distance per notch, as a fraction of the shorter screen side. */
+    private const val SCROLL_STEP_FRACTION = 0.12f
+
+    /**
+     * Long enough that the drag scrolls by its length rather than flinging.
+     */
+    private const val SCROLL_DURATION_MS = 250L
+
+    private const val SCROLL_EDGE_MARGIN_PX = 16
     private const val NOTIF_IME_NOT_SETUP_ID = 1
 
     private val TAG = GlobalInputService::class.java.simpleName
