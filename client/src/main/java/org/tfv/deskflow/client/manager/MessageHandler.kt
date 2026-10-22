@@ -43,7 +43,7 @@ import org.tfv.deskflow.client.util.logging.KLoggingManager
 
 class MessageHandler(
   private val socket: FullDuplexSocket,
-  private val target: ServerTarget,
+  @Volatile private var target: ServerTarget,
 ) : AbstractDisposable() {
 
   @Volatile
@@ -365,6 +365,19 @@ class MessageHandler(
 
   private fun sendInfo() {
     sendMessage(getInfoMessage())
+  }
+
+  /**
+   * Report a new screen size (e.g. after rotation) to the server without
+   * reconnecting, the same way the desktop client reports a shape change.
+   */
+  fun updateScreenSize(width: Int, height: Int) {
+    if (messageExecutor.isShutdown) return
+    messageExecutor.submit {
+      target = target.copy(width = width, height = height)
+      log.info { "Screen size changed to ${width}x${height}, sending info" }
+      sendInfo()
+    }
   }
 
   companion object {

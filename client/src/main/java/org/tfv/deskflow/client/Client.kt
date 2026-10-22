@@ -124,6 +124,20 @@ class Client() : AbstractDisposable() {
         return@submit
       }
 
+      // Only the screen size changed (rotation): tell the server, keep the
+      // connection.
+      val handler = messageHandler
+      if (
+        currentTarget != null &&
+          handler != null &&
+          isConnected &&
+          target == currentTarget.copy(width = target.width, height = target.height)
+      ) {
+        this.target = target
+        handler.updateScreenSize(target.width, target.height)
+        return@submit
+      }
+
       val address = target.address
       val port = target.port
       if (

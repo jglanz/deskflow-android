@@ -26,6 +26,7 @@ package org.tfv.deskflow.services
 
 import android.app.Service
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.Bundle
 import android.os.IBinder
 import android.os.RemoteCallbackList
@@ -314,6 +315,14 @@ class ConnectionService : Service() {
       }
     }
     connectionStateModel.updateScreenFromAppPrefs(appPrefs)
+  }
+
+  /** Rotation changes the screen size; report the new size to the server. */
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    serviceScope.launch {
+      connectionStateModel.updateScreenFromAppPrefs(appPrefsStore.data.first())
+    }
   }
 
   override fun onCreate() {
