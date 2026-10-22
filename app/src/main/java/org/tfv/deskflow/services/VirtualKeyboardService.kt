@@ -411,6 +411,12 @@ class VirtualKeyboardService : InputMethodService() {
     val editHistory = getEditHistory()
 
     when {
+      specialKey == Keyboard.SpecialKey.Return && !mods.isShift -> {
+        // Let the editor run its action (search, go, send...) like a soft
+        // keyboard would; sendKeyChar falls back to an Enter key event, which
+        // inserts a newline in multi-line fields.
+        sendKeyChar('\n')
+      }
       specialKey != null -> {
         val action =
           keyboardActions.entries.find { it.value.specialKey == specialKey }
