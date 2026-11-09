@@ -2,6 +2,7 @@ package org.tfv.deskflow.services.shizuku
 
 import android.content.pm.PackageManager
 import android.os.IBinder
+import android.os.Parcel
 import android.view.InputEvent
 import android.view.MotionEvent
 import java.lang.reflect.Method
@@ -26,6 +27,11 @@ import rikka.shizuku.SystemServiceHelper
  * used: some vendor builds (e.g. MediaTek Android 16) crash in
  * LoadedApk.makeApplicationInner while Shizuku starts one, because
  * Application.getProcessName() is null in that process.
+ *
+ * The transaction is built by hand rather than through the generated
+ * IInputManager.Stub.Proxy: the proxy calls Parcel.obtain(binder), which logs
+ * a JavaBinder warning plus a Parcel error for every event when the binder is
+ * a Java wrapper rather than a native BinderProxy.
  *
  * Hidden framework APIs are unlocked with HiddenApiBypass. Injection runs on
  * a single background thread, so each call is still ordered but never blocks
@@ -56,7 +62,29 @@ object ShizukuInputBridge {
   private val statusFlow = MutableStateFlow(Status.NotRunning)
   val status: StateFlow<Status> = statusFlow.asStateFlow()
 
-  private class Injector(val inputManager: Any, val injectInputEvent: Method)
+  /** Wrapped `input` binder plus what's needed to call injectInputEvent on it. */
+  private class Injector(
+    val binder: IBinder,
+    val descriptor: String,
+    val transactionCode: Int,
+  ) {
+    /** Mirrors the AIDL proxy for `boolean injectInputEvent(in InputEvent ev, int mode)`. */
+    fun injectInputEvent(event: InputEvent, mode: Int): Boolean {
+      val data = Parcel.obtain()
+      val reply = Parcel.obtain()
+      try {
+        data.writeInterfaceToken(descriptor)
+        data.writeTypedObject(event, 0)
+        data.writeInt(mode)
+        binder.transact(transactionCode, data, reply, 0)
+        reply.readException()
+        return reply.readInt() != 0
+      } finally {
+        data.recycle()
+        reply.recycle()
+      }
+    }
+  }
 
   @Volatile private var injector: Injector? = null
 
@@ -156,7 +184,7 @@ object ShizukuInputBridge {
       try {
         setDisplayId?.invoke(event, displayId)
         if (actionButton != 0) setActionButton?.invoke(event, actionButton)
-        val ok = inj.injectInputEvent.invoke(inj.inputManager, event, INJECT_MODE_ASYNC) as Boolean
+        val ok = inj.injectInputEvent(event, INJECT_MODE_ASYNC)
         if (!ok) log.warn { "injectInputEvent rejected: $event" }
       } catch (err: Throwable) {
         log.error(err) { "injectInputEvent failed" }
@@ -172,17 +200,16 @@ object ShizukuInputBridge {
         SystemServiceHelper.getSystemService("input")
           ?: error("input service not found")
       )
-    val inputManager =
-      Class.forName("android.hardware.input.IInputManager\$Stub")
-        .getMethod("asInterface", IBinder::class.java)
-        .invoke(null, binder) ?: error("IInputManager.Stub.asInterface returned null")
-    val inject =
-      inputManager.javaClass.getMethod(
-        "injectInputEvent",
-        InputEvent::class.java,
-        Int::class.javaPrimitiveType,
-      )
-    return Injector(inputManager, inject)
+    val stub = Class.forName("android.hardware.input.IInputManager\$Stub")
+    // Transaction codes shift between Android versions, so read it at runtime.
+    val code =
+      stub.getDeclaredField("TRANSACTION_injectInputEvent").apply { isAccessible = true }.getInt(null)
+    val descriptor =
+      runCatching {
+          stub.getDeclaredField("DESCRIPTOR").apply { isAccessible = true }.get(null) as String
+        }
+        .getOrDefault("android.hardware.input.IInputManager")
+    return Injector(binder, descriptor, code)
   }
 
   @Synchronized
