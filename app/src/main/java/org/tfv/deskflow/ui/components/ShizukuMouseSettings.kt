@@ -92,8 +92,8 @@ fun ShizukuMouseSettings(modifier: Modifier = Modifier) {
               R.string.settings_shizuku_status_permission_required
             ShizukuInputBridge.Status.PermissionDenied ->
               R.string.settings_shizuku_status_permission_denied
-            ShizukuInputBridge.Status.Idle,
-            ShizukuInputBridge.Status.Connecting -> R.string.settings_shizuku_status_connecting
+            ShizukuInputBridge.Status.Idle -> R.string.settings_shizuku_status_connecting
+            ShizukuInputBridge.Status.Error -> R.string.settings_shizuku_status_error
             ShizukuInputBridge.Status.Ready -> R.string.settings_shizuku_status_ready
           }
         )

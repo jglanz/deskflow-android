@@ -47,6 +47,7 @@ hiltExt = "1.2.0"
 
 arrow = "2.1.0"
 shizuku = "13.1.5"
+hiddenApiBypass = "6.1"
 
 
 
@@ -147,6 +148,7 @@ iconics-icons-google-material = { group = "com.mikepenz", name = "google-materia
 
 shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
 shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
+hiddenapibypass = { group = "org.lsposed.hiddenapibypass", name = "hiddenapibypass", version.ref = "hiddenApiBypass" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

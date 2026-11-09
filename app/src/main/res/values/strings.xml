@@ -102,6 +102,7 @@
     <string name="settings_shizuku_status_permission_required">Shizuku permission needed. Using touch gestures.</string>
     <string name="settings_shizuku_status_permission_denied">Shizuku permission denied. Grant it in the Shizuku app.</string>
     <string name="settings_shizuku_status_connecting">Connecting to Shizuku…</string>
+    <string name="settings_shizuku_status_error">Could not set up input injection via Shizuku. Using touch gestures.</string>
     <string name="settings_shizuku_status_ready">Active: mouse events are injected via Shizuku.</string>
     <string name="settings_shizuku_grant_permission">Grant Shizuku permission</string>
 

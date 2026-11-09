@@ -30,7 +30,7 @@ class ShizukuMouseInjector(private val bridge: ShizukuInputBridge = ShizukuInput
   var displayId: Int = 0
 
   val isReady: Boolean
-    get() = bridge.service != null
+    get() = bridge.isReady
 
   fun moveTo(newX: Float, newY: Float, metaState: Int = 0) {
     x = newX
@@ -86,7 +86,7 @@ class ShizukuMouseInjector(private val bridge: ShizukuInputBridge = ShizukuInput
     vScroll: Float = 0f,
     metaState: Int = 0,
   ) {
-    val svc = bridge.service ?: return
+    if (!bridge.isReady) return
     val now = SystemClock.uptimeMillis()
     val props =
       MotionEvent.PointerProperties().apply {
@@ -126,13 +126,8 @@ class ShizukuMouseInjector(private val bridge: ShizukuInputBridge = ShizukuInput
         InputDevice.SOURCE_MOUSE,
         0,
       )
-    try {
-      svc.injectMotionEvent(event, displayId, actionButton)
-    } catch (err: Exception) {
-      log.error(err) { "Shizuku inject failed" }
-    } finally {
-      event.recycle()
-    }
+    // The bridge takes ownership of the event and recycles it after injecting.
+    bridge.inject(event, displayId, actionButton)
   }
 
   companion object {

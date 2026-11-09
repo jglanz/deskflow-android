@@ -1,23 +1,35 @@
 package org.tfv.deskflow.services.shizuku
 
-import android.content.ComponentName
-import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
+import android.view.InputEvent
+import android.view.MotionEvent
+import java.lang.reflect.Method
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import org.tfv.deskflow.BuildConfig
+import org.lsposed.hiddenapibypass.HiddenApiBypass
 import org.tfv.deskflow.client.util.logging.KLoggingManager
 import rikka.shizuku.Shizuku
+import rikka.shizuku.ShizukuBinderWrapper
+import rikka.shizuku.SystemServiceHelper
 
 /**
- * App-side manager for the Shizuku input user service.
+ * Injects input events through the system `input` service (IInputManager)
+ * using Shizuku's shell identity.
  *
- * Tracks whether Shizuku is running, whether we hold its permission, and binds
- * [ShizukuInputUserService] while [setWanted] is true. Shared by
- * GlobalInputService (which injects) and the settings UI (which shows status
- * and requests permission). Shizuku listeners fire on the main thread.
+ * We call IInputManager from our own process through [ShizukuBinderWrapper],
+ * which forwards each transaction via the Shizuku server running as
+ * shell/root (so INJECT_EVENTS is satisfied). A Shizuku UserService is not
+ * used: some vendor builds (e.g. MediaTek Android 16) crash in
+ * LoadedApk.makeApplicationInner while Shizuku starts one, because
+ * Application.getProcessName() is null in that process.
+ *
+ * Hidden framework APIs are unlocked with HiddenApiBypass. Injection runs on
+ * a single background thread, so each call is still ordered but never blocks
+ * the caller.
  */
 object ShizukuInputBridge {
   private val log = KLoggingManager.logger("ShizukuInputBridge")
@@ -29,57 +41,50 @@ object ShizukuInputBridge {
     PermissionRequired,
     /** The user denied access with "don't ask again"; must be granted from the Shizuku app. */
     PermissionDenied,
-    /** Permission granted, user service not bound (feature disabled). */
+    /** Permission granted, injection not set up (feature disabled). */
     Idle,
-    Connecting,
+    /** Setting up the IInputManager proxy failed; see logs. */
+    Error,
     Ready,
   }
 
   private const val PERMISSION_REQUEST_CODE = 0x5e1f
 
+  /** InputManager.INJECT_INPUT_EVENT_MODE_ASYNC */
+  private const val INJECT_MODE_ASYNC = 0
+
   private val statusFlow = MutableStateFlow(Status.NotRunning)
   val status: StateFlow<Status> = statusFlow.asStateFlow()
 
-  @Volatile
-  var service: IShizukuInputService? = null
-    private set
+  private class Injector(val inputManager: Any, val injectInputEvent: Method)
 
-  private var wanted = false
-  private var bound = false
-  private var initialized = false
+  @Volatile private var injector: Injector? = null
 
-  private val userServiceArgs by lazy {
-    Shizuku.UserServiceArgs(
-        ComponentName(BuildConfig.APPLICATION_ID, ShizukuInputUserService::class.java.name)
-      )
-      .daemon(false)
-      .processNameSuffix("shizuku_input")
-      .debuggable(BuildConfig.DEBUG)
-      .version(BuildConfig.VERSION_CODE)
+  val isReady: Boolean
+    get() = injector != null
+
+  private val executor: ExecutorService =
+    Executors.newSingleThreadExecutor { r -> Thread(r, "ShizukuInput").apply { isDaemon = true } }
+
+  private val setDisplayId: Method? by lazy {
+    runCatching {
+        InputEvent::class.java.getMethod("setDisplayId", Int::class.javaPrimitiveType)
+      }
+      .onFailure { log.error(it) { "InputEvent.setDisplayId unavailable" } }
+      .getOrNull()
   }
 
-  private val connection =
-    object : ServiceConnection {
-      override fun onServiceConnected(name: ComponentName, binder: IBinder?) {
-        if (binder == null || !binder.pingBinder()) {
-          log.warn { "Shizuku user service connected with dead binder" }
-          return
-        }
-        val svc = IShizukuInputService.Stub.asInterface(binder)
-        service = svc
-        log.info {
-          "Shizuku input service connected (uid=${runCatching { svc.uid }.getOrNull()})"
-        }
-        refresh()
+  private val setActionButton: Method? by lazy {
+    runCatching {
+        MotionEvent::class.java.getMethod("setActionButton", Int::class.javaPrimitiveType)
       }
+      .onFailure { log.error(it) { "MotionEvent.setActionButton unavailable" } }
+      .getOrNull()
+  }
 
-      override fun onServiceDisconnected(name: ComponentName) {
-        log.warn { "Shizuku input service disconnected" }
-        service = null
-        bound = false
-        refresh()
-      }
-    }
+  private var wanted = false
+  private var initialized = false
+  private var setupFailed = false
 
   private val binderReceived =
     Shizuku.OnBinderReceivedListener {
@@ -90,8 +95,10 @@ object ShizukuInputBridge {
   private val binderDead =
     Shizuku.OnBinderDeadListener {
       log.warn { "Shizuku binder died" }
-      service = null
-      bound = false
+      synchronized(this) {
+        injector = null
+        setupFailed = false
+      }
       refresh()
     }
 
@@ -109,16 +116,21 @@ object ShizukuInputBridge {
   fun init() {
     if (initialized) return
     initialized = true
+    runCatching { HiddenApiBypass.addHiddenApiExemptions("") }
+      .onFailure { log.error(it) { "HiddenApiBypass failed" } }
     Shizuku.addBinderReceivedListenerSticky(binderReceived)
     Shizuku.addBinderDeadListener(binderDead)
     Shizuku.addRequestPermissionResultListener(permissionResult)
     refresh()
   }
 
-  /** Bind the user service when possible (true) or unbind it (false). */
+  /** Enable (true) or disable (false) injection; sets up the proxy when possible. */
   fun setWanted(value: Boolean) {
     init()
-    synchronized(this) { wanted = value }
+    synchronized(this) {
+      wanted = value
+      if (value) setupFailed = false
+    }
     refresh()
   }
 
@@ -130,6 +142,49 @@ object ShizukuInputBridge {
       .onFailure { log.error(it) { "Shizuku permission request failed" } }
   }
 
+  /**
+   * Inject [event] asynchronously and recycle it afterwards. Takes ownership
+   * of [event]: the caller must not use or recycle it.
+   */
+  fun inject(event: MotionEvent, displayId: Int, actionButton: Int) {
+    val inj = injector
+    if (inj == null) {
+      event.recycle()
+      return
+    }
+    executor.execute {
+      try {
+        setDisplayId?.invoke(event, displayId)
+        if (actionButton != 0) setActionButton?.invoke(event, actionButton)
+        val ok = inj.injectInputEvent.invoke(inj.inputManager, event, INJECT_MODE_ASYNC) as Boolean
+        if (!ok) log.warn { "injectInputEvent rejected: $event" }
+      } catch (err: Throwable) {
+        log.error(err) { "injectInputEvent failed" }
+      } finally {
+        event.recycle()
+      }
+    }
+  }
+
+  private fun createInjector(): Injector {
+    val binder: IBinder =
+      ShizukuBinderWrapper(
+        SystemServiceHelper.getSystemService("input")
+          ?: error("input service not found")
+      )
+    val inputManager =
+      Class.forName("android.hardware.input.IInputManager\$Stub")
+        .getMethod("asInterface", IBinder::class.java)
+        .invoke(null, binder) ?: error("IInputManager.Stub.asInterface returned null")
+    val inject =
+      inputManager.javaClass.getMethod(
+        "injectInputEvent",
+        InputEvent::class.java,
+        Int::class.javaPrimitiveType,
+      )
+    return Injector(inputManager, inject)
+  }
+
   @Synchronized
   fun refresh() {
     val running = Shizuku.pingBinder()
@@ -138,20 +193,19 @@ object ShizukuInputBridge {
         runCatching { Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED }
           .getOrDefault(false)
 
-    if (wanted && granted && !bound) {
-      bound = true
-      runCatching { Shizuku.bindUserService(userServiceArgs, connection) }
-        .onFailure {
-          bound = false
-          log.error(it) { "Failed to bind Shizuku user service" }
+    if (wanted && granted && injector == null && !setupFailed) {
+      runCatching { createInjector() }
+        .onSuccess {
+          injector = it
+          log.info { "Shizuku input injection ready (server uid=${Shizuku.getUid()})" }
         }
-    } else if ((!wanted || !granted) && bound) {
-      if (running) {
-        runCatching { Shizuku.unbindUserService(userServiceArgs, connection, true) }
-          .onFailure { log.warn(it) { "Failed to unbind Shizuku user service" } }
-      }
-      bound = false
-      service = null
+        .onFailure {
+          setupFailed = true
+          log.error(it) { "Failed to set up Shizuku IInputManager proxy" }
+        }
+    } else if ((!wanted || !granted) && injector != null) {
+      injector = null
+      log.info { "Shizuku input injection stopped" }
     }
 
     statusFlow.value =
@@ -163,8 +217,8 @@ object ShizukuInputBridge {
           )
             Status.PermissionDenied
           else Status.PermissionRequired
-        service != null -> Status.Ready
-        bound -> Status.Connecting
+        injector != null -> Status.Ready
+        wanted && setupFailed -> Status.Error
         else -> Status.Idle
       }
   }
