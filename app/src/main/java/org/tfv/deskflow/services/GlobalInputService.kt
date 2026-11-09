@@ -47,6 +47,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
@@ -67,6 +68,8 @@ import kotlin.math.min
 import kotlin.math.sqrt
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import org.tfv.deskflow.R
 import org.tfv.deskflow.client.events.KeyboardEvent
 import org.tfv.deskflow.client.events.MouseEvent
@@ -75,6 +78,9 @@ import org.tfv.deskflow.client.models.ClipboardData
 import org.tfv.deskflow.client.util.Keyboard
 import org.tfv.deskflow.client.util.logging.KLoggingManager
 import org.tfv.deskflow.components.GlobalKeyboardManager
+import org.tfv.deskflow.data.appPrefsStore
+import org.tfv.deskflow.services.shizuku.ShizukuInputBridge
+import org.tfv.deskflow.services.shizuku.ShizukuMouseInjector
 import org.tfv.deskflow.ext.canDrawOverlays
 import org.tfv.deskflow.ext.getScreenSize
 import org.tfv.deskflow.ext.sendServiceConnectionEvent
@@ -280,6 +286,19 @@ class GlobalInputService : AccessibilityService() {
   )
 
   private val keyboardWasOpen = AtomicBoolean(false)
+
+  /**
+   * Injects real SOURCE_MOUSE events via Shizuku when enabled in prefs and the
+   * Shizuku user service is connected. Otherwise mouse input falls back to
+   * accessibility gestures. Only touched on the main thread.
+   */
+  private val shizukuMouse = ShizukuMouseInjector()
+
+  /** Mirrors AppPrefs.input.shizuku_mouse_enabled. */
+  @Volatile private var shizukuMouseEnabled = false
+
+  private val useShizukuMouse: Boolean
+    get() = shizukuMouseEnabled && shizukuMouse.isReady
 
   /** WindowManager instance for managing the mouse pointer view. */
   private lateinit var windowManager: WindowManager
@@ -586,6 +605,25 @@ class GlobalInputService : AccessibilityService() {
 
     // Monitor connection state to reset IME state when disconnected
     monitorConnectionState()
+
+    monitorShizukuMousePref()
+  }
+
+  /** Bind/unbind the Shizuku input service as the preference changes. */
+  private fun monitorShizukuMousePref() {
+    serviceScope.launch {
+      appPrefsStore.data
+        .map { it.input.shizukuMouseEnabled }
+        .distinctUntilChanged()
+        .collect { enabled ->
+          withContext(Dispatchers.Main) {
+            log.info { "Shizuku mouse injection ${if (enabled) "enabled" else "disabled"}" }
+            if (!enabled) shizukuMouse.releaseAll()
+            shizukuMouseEnabled = enabled
+            ShizukuInputBridge.setWanted(enabled)
+          }
+        }
+    }
   }
 
   private fun acquireWifiLowLatencyLock() {
@@ -654,6 +692,8 @@ class GlobalInputService : AccessibilityService() {
           }
           withContext(Dispatchers.Main) {
             hideMousePointer()
+            // Don't leave a button held down in the target app.
+            shizukuMouse.releaseAll()
           }
           releaseWifiLowLatencyLock()
         }
@@ -720,6 +760,8 @@ class GlobalInputService : AccessibilityService() {
 
     serviceScope.cancel()
     serviceClient.unbind()
+    shizukuMouse.releaseAll()
+    ShizukuInputBridge.setWanted(false)
     hideMousePointer()  // Use the safe hide method instead of direct removeView
     screenWakelockManager.cleanup()  // Clean up wakelock resources
     releaseWifiLowLatencyLock()  // Release WiFi low latency lock
@@ -1220,6 +1262,8 @@ class GlobalInputService : AccessibilityService() {
    * > Example: Used for mouse movement and clicking in the global input service.
    */
   private fun onMouseEvent(event: MouseEvent) {
+    if (useShizukuMouse && onShizukuMouseEvent(event)) return
+
     when (event.type) {
       MouseEvent.Type.Move -> {
         val currentX = event.x
@@ -1412,6 +1456,69 @@ class GlobalInputService : AccessibilityService() {
       }
     }
   }
+
+  /**
+   * Handle a mouse event by injecting native mouse MotionEvents via Shizuku.
+   * The overlay pointer is still moved, since injected events don't drive
+   * Android's own pointer (it only follows real input devices).
+   *
+   * @return false if the event should fall through to the gesture path
+   *   (side buttons 4/5, which map to global Back/Recents actions).
+   */
+  private fun onShizukuMouseEvent(event: MouseEvent): Boolean {
+    shizukuMouse.displayId = activeDisplayId
+    val metaState = currentMetaState()
+
+    when (event.type) {
+      MouseEvent.Type.Move,
+      MouseEvent.Type.MoveRelative -> {
+        val (newX, newY) =
+          if (event.type == MouseEvent.Type.Move) event.x to event.y
+          else (mousePointerLayout.x + event.x) to (mousePointerLayout.y + event.y)
+        moveMousePointer(newX, newY)
+        screenWakelockManager.onInputActivity()
+        shizukuMouse.moveTo(newX.toFloat(), newY.toFloat(), metaState)
+      }
+
+      MouseEvent.Type.Down -> {
+        val button = ShizukuMouseInjector.mapDeskflowButton(event.id.toInt()) ?: return false
+        screenWakelockManager.onInputActivity()
+        shizukuMouse.buttonDown(button, metaState)
+      }
+
+      MouseEvent.Type.Up -> {
+        val button = ShizukuMouseInjector.mapDeskflowButton(event.id.toInt()) ?: return false
+        shizukuMouse.buttonUp(button, metaState)
+      }
+
+      MouseEvent.Type.Wheel -> {
+        // Deskflow uses 120 units per wheel detent; Android uses 1.0.
+        // Ctrl is forwarded in metaState so apps that support Ctrl+wheel zoom natively.
+        screenWakelockManager.onInputActivity()
+        shizukuMouse.scroll(
+          h = event.x / WHEEL_DELTA_PER_DETENT,
+          v = event.y / WHEEL_DELTA_PER_DETENT,
+          metaState = metaState,
+        )
+      }
+    }
+    return true
+  }
+
+  /** Current Deskflow modifier keys as a KeyEvent.META_* mask. */
+  private fun currentMetaState(): Int =
+    keyboardManager.state.value.modifierKeys.modifierKeys.fold(0) { meta, key ->
+      meta or
+        when (key.mask) {
+          Keyboard.ModifierKeyMask.Shift -> KeyEvent.META_SHIFT_ON
+          Keyboard.ModifierKeyMask.Control -> KeyEvent.META_CTRL_ON
+          Keyboard.ModifierKeyMask.Alt,
+          Keyboard.ModifierKeyMask.AltGr -> KeyEvent.META_ALT_ON
+          Keyboard.ModifierKeyMask.Meta,
+          Keyboard.ModifierKeyMask.Super -> KeyEvent.META_META_ON
+          else -> 0
+        }
+    }
 
   /**
    * Perform a spread gesture (zoom in) at the mouse pointer location.
@@ -1953,6 +2060,9 @@ class GlobalInputService : AccessibilityService() {
   companion object {
     private const val CHANNEL_ID = "deskflow_service_channel"
     private const val NOTIF_IME_NOT_SETUP_ID = 1
+
+    /** Deskflow wheel delta for one detent (matches Windows WHEEL_DELTA). */
+    private const val WHEEL_DELTA_PER_DETENT = 120f
 
     private val TAG = GlobalInputService::class.java.simpleName
     private val log =

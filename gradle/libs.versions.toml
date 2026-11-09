@@ -46,6 +46,7 @@ hilt = "2.56"
 hiltExt = "1.2.0"
 
 arrow = "2.1.0"
+shizuku = "13.1.5"
 
 
 
@@ -143,6 +144,9 @@ iconics-core = { group = "com.mikepenz", name = "iconics-core", version.ref = "i
 iconics-typeface-api = { group = "com.mikepenz", name = "iconics-typeface-api", version.ref = "iconics" }
 iconics-compose = { group = "com.mikepenz", name = "iconics-compose", version.ref = "iconics" }
 iconics-icons-google-material = { group = "com.mikepenz", name = "google-material-typeface", version.ref = "iconicsGoogleMaterial" }
+
+shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
+shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

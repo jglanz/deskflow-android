@@ -155,6 +155,9 @@ dependencies {
 
   implementation(libs.google.accompanist.permissions)
 
+  implementation(libs.shizuku.api)
+  implementation(libs.shizuku.provider)
+
   implementation(libs.androidx.core.ktx)
   implementation(libs.androidx.datastore.normal)
   implementation(libs.androidx.datastore.preferences)

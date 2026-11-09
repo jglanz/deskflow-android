@@ -95,6 +95,16 @@
     <string name="settings_screen_disconnect_on_screen_off_label">Disconnect when screen off</string>
     <string name="settings_screen_disconnect_on_screen_off_description">Automatically disconnect from server when screen turns off to save battery</string>
 
+    <!-- Shizuku mouse injection -->
+    <string name="settings_shizuku_mouse_label">Use Shizuku for mouse input</string>
+    <string name="settings_shizuku_mouse_description">Inject real mouse events (hover, right/middle click, wheel scrolling) instead of simulated touch gestures. Requires Shizuku, which must be restarted via ADB after each reboot.</string>
+    <string name="settings_shizuku_status_not_running">Shizuku is not running. Using touch gestures.</string>
+    <string name="settings_shizuku_status_permission_required">Shizuku permission needed. Using touch gestures.</string>
+    <string name="settings_shizuku_status_permission_denied">Shizuku permission denied. Grant it in the Shizuku app.</string>
+    <string name="settings_shizuku_status_connecting">Connecting to Shizuku…</string>
+    <string name="settings_shizuku_status_ready">Active: mouse events are injected via Shizuku.</string>
+    <string name="settings_shizuku_grant_permission">Grant Shizuku permission</string>
+
     <!-- Fingerprint verification strings -->
     <string name="fingerprint_dialog_unknown_title">Verify Server Certificate</string>
     <string name="fingerprint_dialog_unknown_description">This is the first connection to this server. Please verify the TLS certificate fingerprint below matches the fingerprint displayed on the server.</string>

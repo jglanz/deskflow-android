@@ -54,6 +54,12 @@ message AppPrefs {
     bool is_enabled = 1;
   }
 
+  message InputConfig {
+    // Inject mouse events via Shizuku (IInputManager) instead of
+    // accessibility gestures. Requires Shizuku running with permission granted.
+    bool shizuku_mouse_enabled = 1;
+  }
+
   ScreenConfig screen = 1;
 
   ActionsConfig actions = 2;
@@ -63,5 +69,7 @@ message AppPrefs {
   TrustConfig trust = 4;
 
   ConnectionConfig connection = 5;
+
+  InputConfig input = 6;
 
 }
