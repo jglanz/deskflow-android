@@ -1,0 +1,101 @@
+name: Build
+
+# Every push/PR builds the APK and uploads it as an artifact.
+# A push to master whose version (version.properties) has no release yet also
+# creates a draft release "vX.Y.Z" with the APK attached. Publishing the draft
+# creates the tag on the commit it was built from.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # draft release creation
+
+# One run per ref at a time, so two quick merges can't both create a draft.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.SIGNING_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # A release (published or draft) or tag for this version means it has already been
+      # released or is waiting to be published; later merges then leave it alone.
+      - name: Check for a new version
+        id: version
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MAJOR=$(sed -n 's/^major=//p' version.properties)
+          MINOR=$(sed -n 's/^minor=//p' version.properties)
+          PATCH=$(sed -n 's/^patch=//p' version.properties)
+          [ -n "$MAJOR" ] && [ -n "$MINOR" ] && [ -n "$PATCH" ] || { echo "version not found in version.properties"; exit 1; }
+          VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          RELEASES=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
+          if grep -qx "v$VERSION" <<< "$RELEASES" \
+              || git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+            echo "v$VERSION already exists; no draft"
+          else
+            echo "v$VERSION is new; drafting a release"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Build APK
+        run: ./gradlew assembleRelease --no-daemon
+
+      # Release builds are signed with a persistent key so updates install over each other.
+      # Without the secrets (e.g. on a fork) the release APK is simply left unsigned.
+      - name: Sign APK
+        id: sign_apk
+        if: env.HAS_SIGNING_KEY == 'true'
+        uses: r0adkll/sign-android-release@v1
+        with:
+          releaseDirectory: app/build/outputs/apk/release
+          signingKeyBase64: ${{ secrets.SIGNING_KEY }}
+          alias: ${{ secrets.SIGNING_KEY_ALIAS }}
+          keyStorePassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          keyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        env:
+          BUILD_TOOLS_VERSION: "34.0.0"
+
+      - name: Stage APK
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.release == 'true' && steps.version.outputs.version || '' }}
+          SIGNED_APK: ${{ steps.sign_apk.outputs.signedReleaseFile }}
+        run: |
+          mkdir -p dist
+          VERSION="${RELEASE_VERSION:-$(git rev-parse --short HEAD)}"
+          APK="${SIGNED_APK:-app/build/outputs/apk/release/app-release-unsigned.apk}"
+          cp "$APK" "dist/DeskflowAndroid-$VERSION.apk"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskflow-android-apk
+          path: dist/*.apk
+
+      # Auto-generated notes are a starting point; edit the draft, then publish it.
+      - name: Draft release
+        if: steps.version.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "v$VERSION" "dist/DeskflowAndroid-$VERSION.apk" \
+            --draft --target "$GITHUB_SHA" --title "Deskflow Android $VERSION" --generate-notes
