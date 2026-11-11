@@ -30,6 +30,7 @@ package org.tfv.deskflow.client.net
 import java.security.cert.X509Certificate
 import javax.net.ssl.X509TrustManager
 import java.net.InetSocketAddress
+import java.net.StandardSocketOptions
 import java.nio.ByteBuffer
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
@@ -289,6 +290,9 @@ class FullDuplexSocket(
             // Open non-blocking channel for TLS handshake
             SocketChannel.open().apply {
               configureBlocking(false)
+              // Disable Nagle: the protocol is a stream of tiny messages (mouse
+              // moves are a few bytes) that Nagle would otherwise batch.
+              setOption(StandardSocketOptions.TCP_NODELAY, true)
               connect(InetSocketAddress(host, port))
               register(sel, SelectionKey.OP_CONNECT)
             }
@@ -297,6 +301,9 @@ class FullDuplexSocket(
           else ->
             SocketChannel.open().apply {
               configureBlocking(false)
+              // Disable Nagle: the protocol is a stream of tiny messages (mouse
+              // moves are a few bytes) that Nagle would otherwise batch.
+              setOption(StandardSocketOptions.TCP_NODELAY, true)
               connect(InetSocketAddress(host, port))
               register(sel, SelectionKey.OP_CONNECT)
             }
