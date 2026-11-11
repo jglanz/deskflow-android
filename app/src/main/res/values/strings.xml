@@ -106,6 +106,16 @@
     <string name="settings_shizuku_status_ready">Active: mouse events are injected via Shizuku.</string>
     <string name="settings_shizuku_grant_permission">Grant Shizuku permission</string>
 
+    <!-- Shizuku virtual keyboard -->
+    <string name="settings_shizuku_keyboard_label">Use Shizuku for keyboard input</string>
+    <string name="settings_shizuku_keyboard_description">Type on a virtual hardware keyboard instead of the Deskflow on-screen keyboard. Apps get real key presses and the on-screen keyboard stays hidden. Pick its layout under Settings → Physical keyboard → Deskflow Keyboard. If Escape acts as Back, turn off the system\'s Escape-as-Back option (on Lenovo: Physical keyboard → Keyboard assistance → Modifier keys). Requires Shizuku.</string>
+    <string name="settings_shizuku_keyboard_status_not_running">Shizuku is not running. Using the Deskflow keyboard.</string>
+    <string name="settings_shizuku_keyboard_status_permission_required">Shizuku permission needed. Using the Deskflow keyboard.</string>
+    <string name="settings_shizuku_keyboard_status_waiting">Ready: the virtual keyboard is added when connected to a server.</string>
+    <string name="settings_shizuku_keyboard_status_starting">Adding the virtual keyboard…</string>
+    <string name="settings_shizuku_keyboard_status_error">Could not create the virtual keyboard via Shizuku. Using the Deskflow keyboard.</string>
+    <string name="settings_shizuku_keyboard_status_ready">Active: keys are typed on the virtual keyboard.</string>
+
     <!-- Fingerprint verification strings -->
     <string name="fingerprint_dialog_unknown_title">Verify Server Certificate</string>
     <string name="fingerprint_dialog_unknown_description">This is the first connection to this server. Please verify the TLS certificate fingerprint below matches the fingerprint displayed on the server.</string>

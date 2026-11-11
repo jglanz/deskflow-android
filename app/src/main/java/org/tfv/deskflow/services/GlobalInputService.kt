@@ -80,6 +80,7 @@ import org.tfv.deskflow.client.util.logging.KLoggingManager
 import org.tfv.deskflow.components.GlobalKeyboardManager
 import org.tfv.deskflow.data.appPrefsStore
 import org.tfv.deskflow.services.shizuku.ShizukuInputBridge
+import org.tfv.deskflow.services.shizuku.ShizukuKeyboardInjector
 import org.tfv.deskflow.services.shizuku.ShizukuMouseInjector
 import org.tfv.deskflow.ext.canDrawOverlays
 import org.tfv.deskflow.ext.getScreenSize
@@ -607,6 +608,21 @@ class GlobalInputService : AccessibilityService() {
     monitorConnectionState()
 
     monitorShizukuMousePref()
+
+    ShizukuKeyboardInjector.init(this)
+    monitorShizukuKeyboardPref()
+  }
+
+  /** Attach/remove the Shizuku virtual keyboard as the preference changes. */
+  private fun monitorShizukuKeyboardPref() {
+    serviceScope.launch {
+      appPrefsStore.data
+        .map { it.input.shizukuKeyboardEnabled }
+        .distinctUntilChanged()
+        .collect { enabled ->
+          withContext(Dispatchers.Main) { ShizukuKeyboardInjector.setWanted(enabled) }
+        }
+    }
   }
 
   /** Bind/unbind the Shizuku input service as the preference changes. */
@@ -692,10 +708,18 @@ class GlobalInputService : AccessibilityService() {
           }
           withContext(Dispatchers.Main) {
             hideMousePointer()
-            // Don't leave a button held down in the target app.
+            // Don't leave a button or key held down in the target app.
             shizukuMouse.releaseAll()
+            ShizukuKeyboardInjector.releaseAll()
           }
           releaseWifiLowLatencyLock()
+        }
+
+        // The virtual keyboard exists only while connected to a server.
+        withContext(Dispatchers.Main) {
+          ShizukuKeyboardInjector.setConnected(
+            state.isConnected && state.isEnabled && state.ackReceived
+          )
         }
 
         // When disconnected or disabled, reset IME tracking state
@@ -726,8 +750,11 @@ class GlobalInputService : AccessibilityService() {
     if (modKey != null) {
       log.debug { "Modifier key event: $modKey, type=${event.type}" }
       keyboardManager.process(event)
+      ShizukuKeyboardInjector.handle(event)
       return
     }
+
+    if (ShizukuKeyboardInjector.isActive && onShizukuKeyboardEvent(event)) return
 
     // Only handle Down and Repeat events for non-modifier keys - ignore Up to avoid duplicates
     if (event.type == KeyboardEvent.Type.Up) {
@@ -735,6 +762,39 @@ class GlobalInputService : AccessibilityService() {
     }
 
     keyboardManager.process(event)
+  }
+
+  /**
+   * Type a key on the Shizuku virtual keyboard. Global shortcuts still win
+   * and consume the key, except the ones in [SHIZUKU_KEYBOARD_NATIVE_ACTIONS]:
+   * e.g. a real Escape key reaches apps (terminals, editors) and Android turns
+   * an unhandled one into Back.
+   *
+   * @return false if the key can't be typed this way (e.g. a character the
+   *   current layout lacks) and should take the regular path.
+   */
+  /**
+   * Global actions a real key press already performs natively, so the key is
+   * typed instead: Escape (Back) and the arrow keys (D-pad navigation).
+   */
+  private val SHIZUKU_KEYBOARD_NATIVE_ACTIONS =
+    setOf(
+      GLOBAL_ACTION_BACK,
+      GLOBAL_ACTION_DPAD_UP,
+      GLOBAL_ACTION_DPAD_DOWN,
+      GLOBAL_ACTION_DPAD_LEFT,
+      GLOBAL_ACTION_DPAD_RIGHT,
+    )
+
+  private fun onShizukuKeyboardEvent(event: KeyboardEvent): Boolean {
+    if (event.type == KeyboardEvent.Type.Down) {
+      val action = keyboardManager.findAction(event)
+      if (action != null && action.actionId !in SHIZUKU_KEYBOARD_NATIVE_ACTIONS) {
+        keyboardManager.process(event)
+        return true
+      }
+    }
+    return ShizukuKeyboardInjector.handle(event)
   }
 
   /**
@@ -762,6 +822,7 @@ class GlobalInputService : AccessibilityService() {
     serviceClient.unbind()
     shizukuMouse.releaseAll()
     ShizukuInputBridge.setWanted(false)
+    ShizukuKeyboardInjector.shutdown()
     hideMousePointer()  // Use the safe hide method instead of direct removeView
     screenWakelockManager.cleanup()  // Clean up wakelock resources
     releaseWifiLowLatencyLock()  // Release WiFi low latency lock

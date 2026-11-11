@@ -55,6 +55,7 @@ import org.tfv.deskflow.types.EditorKeyboardAction
 import org.tfv.deskflow.types.GlobalKeyboardAction
 import org.tfv.deskflow.types.GlobalKeyboardManagerState
 import org.tfv.deskflow.types.KeyboardAction
+import org.tfv.deskflow.types.ModifierKeys
 import org.tfv.deskflow.types.ShortcutKey
 
 open class GlobalKeyboardManager(
@@ -156,6 +157,23 @@ open class GlobalKeyboardManager(
 
   open fun process(event: KeyboardEvent) {
     executor.submit<Unit> { processInternal(event) }
+  }
+
+  /**
+   * The global action [event]'s key combination triggers, judged from the
+   * modifier mask carried by the event itself (the tracked modifier state is
+   * updated asynchronously). Safe to call from any thread.
+   */
+  fun findAction(event: KeyboardEvent): GlobalKeyboardAction? {
+    val mods = event.getModifiers()
+    var modKeys = ModifierKeys()
+    if (mods.isControl) modKeys = modKeys.updateModifierKeys(true, Keyboard.ModifierKey.Control)
+    if (mods.isAlt) modKeys = modKeys.updateModifierKeys(true, Keyboard.ModifierKey.Alt)
+    if (mods.isShift) modKeys = modKeys.updateModifierKeys(true, Keyboard.ModifierKey.Shift)
+    if (mods.isMeta) modKeys = modKeys.updateModifierKeys(true, Keyboard.ModifierKey.Meta)
+    if (mods.isSuper) modKeys = modKeys.updateModifierKeys(true, Keyboard.ModifierKey.Super)
+    val shortcut = ShortcutKey(event.id.toInt(), modKeys)
+    return editableState.value.keyboardActions.values.find { it.shortcutKeys.contains(shortcut) }
   }
 
   fun dumpSystemActions() {

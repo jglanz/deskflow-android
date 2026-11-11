@@ -63,6 +63,7 @@ import org.tfv.deskflow.ui.components.DeskflowCardSubtitle
 import org.tfv.deskflow.ui.components.DeskflowCardTitle
 import org.tfv.deskflow.ui.components.IAppState
 import org.tfv.deskflow.ui.components.LocalSnackbarHostState
+import org.tfv.deskflow.ui.components.ShizukuKeyboardSettings
 import org.tfv.deskflow.ui.components.ShizukuMouseSettings
 import org.tfv.deskflow.ui.components.deskflowCardDefaultContainerModifier
 import org.tfv.deskflow.ui.components.deskflowCardStyleDefaults
@@ -420,6 +421,9 @@ fun SettingsScreen(
 
             // Mouse injection via Shizuku (applies immediately)
             ShizukuMouseSettings()
+
+            // Virtual hardware keyboard via Shizuku (applies immediately)
+            ShizukuKeyboardSettings()
 
             Divider(modifier = Modifier.padding(vertical = 8.dp))
 
