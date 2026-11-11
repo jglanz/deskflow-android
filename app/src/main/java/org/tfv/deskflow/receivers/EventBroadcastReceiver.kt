@@ -31,6 +31,7 @@ import org.tfv.deskflow.client.ClientEventBus
 import org.tfv.deskflow.client.events.KeyboardEvent
 import org.tfv.deskflow.client.events.MouseEvent
 import org.tfv.deskflow.client.util.logging.KLoggingManager
+import org.tfv.deskflow.ext.getSerializableExtraCompat
 
 class EventBroadcastReceiver() : BroadcastReceiver() {
 
@@ -38,12 +39,12 @@ class EventBroadcastReceiver() : BroadcastReceiver() {
         when (intent.action) {
             ACTION_KEYBOARD -> {
                 ClientEventBus.emit(
-                    intent.getSerializableExtra("payload", KeyboardEvent::class.java)!!
+                    intent.getSerializableExtraCompat("payload", KeyboardEvent::class.java)!!
                 )
             }
             ACTION_MOUSE -> {
                 ClientEventBus.emit(
-                    intent.getSerializableExtra("payload", MouseEvent::class.java)!!
+                    intent.getSerializableExtraCompat("payload", MouseEvent::class.java)!!
                 )
             }
             else -> {

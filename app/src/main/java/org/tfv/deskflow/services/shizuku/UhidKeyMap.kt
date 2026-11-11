@@ -1,5 +1,6 @@
 package org.tfv.deskflow.services.shizuku
 
+import android.os.Build
 import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
@@ -17,6 +18,11 @@ import android.view.KeyEvent
  * with Shift / AltGr ([KeyCharacterMap.get]). The result is a char → keystroke
  * table that stays correct for whatever layout the user picks in
  * Settings → Physical keyboard.
+ *
+ * Below API 33 there is no way to query a layout's `map key` overrides, so each
+ * position is assumed to produce its Generic.kl (US) keycode. Layouts that only
+ * change characters work; layouts that remap keys (e.g. QWERTZ's Y/Z swap) will
+ * type the wrong character on those keys.
  */
 object UhidKeyMap {
   /** HID modifier byte bits. */
@@ -184,7 +190,12 @@ object UhidKeyMap {
     // Android keycode (after layout) → HID usage
     val keycodeToUsage = LinkedHashMap<Int, Int>()
     for ((location, usage) in LOCATIONS) {
-      val keycode = device.getKeyCodeForKeyLocation(location)
+      val keycode =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+          device.getKeyCodeForKeyLocation(location)
+        } else {
+          location
+        }
       if (keycode != KeyEvent.KEYCODE_UNKNOWN) keycodeToUsage.putIfAbsent(keycode, usage)
     }
     // Keys outside the US location set. Generic.kl maps both Linux key 43 and

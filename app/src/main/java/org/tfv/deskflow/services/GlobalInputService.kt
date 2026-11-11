@@ -40,6 +40,7 @@ import android.content.pm.PackageManager
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.os.Build
 import android.hardware.display.DisplayManager
 import android.net.wifi.WifiManager
 import android.os.Bundle
@@ -88,7 +89,7 @@ import org.tfv.deskflow.ext.sendServiceConnectionEvent
 import org.tfv.deskflow.ext.sendServiceDisconnectionEvent
 
 @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
-@SuppressLint("ServiceCast", "NewApi")
+@SuppressLint("ServiceCast")
 class GlobalInputService : AccessibilityService() {
 
   private var pickerShownForPackage: String? = null
@@ -380,11 +381,14 @@ class GlobalInputService : AccessibilityService() {
     text: String,
     customizer: (NotificationCompat.Builder.() -> Unit)? = null,
   ) {
+    // POST_NOTIFICATIONS is a runtime permission only from API 33; below that
+    // checkSelfPermission reports it denied even though it isn't required.
     if (
-      ContextCompat.checkSelfPermission(
-        this,
-        Manifest.permission.POST_NOTIFICATIONS,
-      ) != PackageManager.PERMISSION_GRANTED
+      Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        ContextCompat.checkSelfPermission(
+          this,
+          Manifest.permission.POST_NOTIFICATIONS,
+        ) != PackageManager.PERMISSION_GRANTED
     ) {
       log.warn {
         "POST_NOTIFICATIONS permission not granted, cannot send notification."
@@ -412,13 +416,29 @@ class GlobalInputService : AccessibilityService() {
   }
 
   private fun isDeskflowKeyboardActive(
-    imeInfo: InputMethodInfo? = imeManager.currentInputMethodInfo
+    imeInfo: InputMethodInfo? = currentImeInfoCompat
   ): Boolean {
     return imeInfo?.let { current -> deskflowImeInfo?.id == current.id }
       ?: false
   }
 
-  @SuppressLint("NewApi")
+  /**
+   * The currently selected IME. [InputMethodManager.getCurrentInputMethodInfo]
+   * is API 34+; below that resolve it from Settings.Secure.DEFAULT_INPUT_METHOD,
+   * which holds the active IME's id.
+   */
+  private val currentImeInfoCompat: InputMethodInfo?
+    get() =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        imeManager.currentInputMethodInfo
+      } else {
+        android.provider.Settings.Secure.getString(
+            contentResolver,
+            android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
+          )
+          ?.let { id -> imeManager.inputMethodList.find { it.id == id } }
+      }
+
   private fun checkIMESetup() {
     val kbOpen = isKeyboardOpened
     val kbWasOpen = keyboardWasOpen.load()
@@ -435,7 +455,7 @@ class GlobalInputService : AccessibilityService() {
 
     keyboardWasOpen.store(true)
 
-    val imeInfo = imeManager.currentInputMethodInfo
+    val imeInfo = currentImeInfoCompat
     if (imeInfo != null) {
       log.debug { "Current IME: ${imeInfo.packageName}" }
       when {
