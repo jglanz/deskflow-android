@@ -27,6 +27,7 @@ package org.tfv.deskflow.ext
 import android.content.Context
 import android.hardware.display.DisplayManager
 import android.view.Display
+import android.view.WindowManager
 import org.tfv.deskflow.client.models.Size
 import org.tfv.deskflow.client.models.SizeF
 
@@ -47,10 +48,17 @@ fun Context.getScreenSize(displayId: Int? = null): ScreenSize {
         this
     }
 
-    // Now use resources.displayMetrics from the correct context
+    // Use the full display bounds rather than resources.displayMetrics: the
+    // latter excludes status/navigation bar insets, and this size is reported
+    // to the server as the screen dimensions, so the remote pointer could not
+    // reach the status bar or the bottom gesture-navigation area.
     val dm = displayContext.resources.displayMetrics
-    val widthPx = dm.widthPixels
-    val heightPx = dm.heightPixels
+    val bounds = displayContext
+        .getSystemService(WindowManager::class.java)
+        .maximumWindowMetrics
+        .bounds
+    val widthPx = bounds.width()
+    val heightPx = bounds.height()
     val widthDp = widthPx / dm.density
     val heightDp = heightPx / dm.density
     return ScreenSize(Size(widthPx, heightPx), SizeF(widthDp, heightDp), widthPx.toFloat() / widthDp)
