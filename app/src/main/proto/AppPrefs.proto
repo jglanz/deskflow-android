@@ -58,6 +58,9 @@ message AppPrefs {
     // Inject mouse events via Shizuku (IInputManager) instead of
     // accessibility gestures. Requires Shizuku running with permission granted.
     bool shizuku_mouse_enabled = 1;
+    // Type keyboard input on a virtual hardware keyboard (/dev/uhid, created
+    // through Shizuku) instead of the Deskflow IME.
+    bool shizuku_keyboard_enabled = 2;
   }
 
   ScreenConfig screen = 1;

@@ -80,6 +80,7 @@ import org.tfv.deskflow.client.util.logging.KLoggingManager
 import org.tfv.deskflow.components.GlobalKeyboardManager.Companion.loadKeyboardActions
 import org.tfv.deskflow.services.keyboard.KeyboardEditHistory
 import org.tfv.deskflow.services.keyboard.actions.VirtualKeyboardAction
+import org.tfv.deskflow.services.shizuku.ShizukuKeyboardInjector
 import org.tfv.deskflow.types.EditorKeyboardAction
 import org.tfv.deskflow.types.ModifierKeys
 import org.tfv.deskflow.types.ShortcutKey
@@ -474,6 +475,11 @@ class VirtualKeyboardService : InputMethodService() {
   private fun onKeyboardEvent(event: KeyboardEvent) {
     log.debug { "onKeyboardEvent: $event" }
 
+    // 0. Keys typed on the Shizuku virtual hardware keyboard reach the app as
+    // real key events; only what it can't type (characters missing from the
+    // current layout) is committed here.
+    if (ShizukuKeyboardInjector.wouldInject(event)) return
+
     // 1. Check if we have a valid input connection.
     val ic = currentInputConnection
     if (ic == null) {
@@ -481,8 +487,11 @@ class VirtualKeyboardService : InputMethodService() {
       return
     }
 
-    // 2. Check if the keyboard view lifecycle is started.
+    // 2. Check if the keyboard view lifecycle is started. With the virtual
+    // hardware keyboard attached Android doesn't show the input view, so the
+    // fallback works without it.
     if (
+      !ShizukuKeyboardInjector.isActive &&
       keyboardViewLifecycleOwner.lifecycle.currentState <
         Lifecycle.State.RESUMED
     ) {
