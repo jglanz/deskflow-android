@@ -42,6 +42,12 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="org.tfv.deskflow.CONNECTION_SERVICE_PERMISSION"/>
 
+    <!-- Declared here so only apps signed with our key can bind ConnectionService
+         (an undeclared permission can be defined first by any other app). -->
+    <permission
+            android:name="org.tfv.deskflow.CONNECTION_SERVICE_PERMISSION"
+            android:protectionLevel="signature"/>
+
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -86,7 +92,6 @@
                 android:name=".services.ConnectionService"
                 android:exported="true"
                 android:permission="org.tfv.deskflow.CONNECTION_SERVICE_PERMISSION"
-                android:protectionLevel="signature"
         >
 <!--            android:process=":connection" -->
             <intent-filter>

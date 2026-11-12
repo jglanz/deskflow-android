@@ -27,8 +27,8 @@ package org.tfv.deskflow.receivers
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import org.tfv.deskflow.services.ConnectionService
-import org.tfv.deskflow.services.GlobalInputService
 
 
 class BootReceiver : BroadcastReceiver() {
@@ -37,9 +37,15 @@ class BootReceiver : BroadcastReceiver() {
         if (ctx == null)
             return
         if (Intent.ACTION_BOOT_COMPLETED == intent!!.action) {
-
-            ctx.startService(Intent(ctx, ConnectionService::class.java))
-            ctx.startService(Intent(ctx, GlobalInputService::class.java))
+            // GlobalInputService is an AccessibilityService: the system starts it
+            // (when enabled) and it starts ConnectionService itself, so it must not
+            // be started here. Starting ConnectionService is best effort; a
+            // background-start rejection must not crash the receiver.
+            try {
+                ctx.startService(Intent(ctx, ConnectionService::class.java))
+            } catch (err: Exception) {
+                Log.w("BootReceiver", "Unable to start ConnectionService on boot", err)
+            }
         }
     }
 }

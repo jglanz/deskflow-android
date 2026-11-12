@@ -56,6 +56,9 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      - name: Unit tests
+        run: ./gradlew :client:test --no-daemon
+
       - name: Build APK
         run: ./gradlew assembleRelease --no-daemon
 

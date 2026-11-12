@@ -50,6 +50,8 @@ dependencies {
     implementation(libs.kotlin.logging.jvm)
     testImplementation(libs.kotlin.test)
     testImplementation(libs.junit.jupiter)
+    // SLF4J binding so classes under test that initialize a logger can load.
+    testImplementation(libs.slf4j.simple)
 }
 
 tasks.test {

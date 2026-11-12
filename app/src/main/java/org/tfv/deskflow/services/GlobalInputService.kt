@@ -345,6 +345,32 @@ class GlobalInputService : AccessibilityService() {
   private val dragThreshold = 10
 
   /**
+   * dispatchGesture() wrapper. If dispatch throws (e.g. an invalid stroke), the
+   * completion callback never fires, so the pending/drag flags would stay set and
+   * wedge all mouse input until the service restarts. Clear them instead.
+   */
+  private fun safeDispatch(
+    gesture: GestureDescription,
+    callback: GestureResultCallback,
+    handler: Handler = globalInputHandler,
+  ) {
+    try {
+      dispatchGesture(gesture, callback, handler)
+    } catch (err: Exception) {
+      log.error(err) { "dispatchGesture threw; resetting input state" }
+      globalInputPending = false
+      resetDragState()
+    }
+  }
+
+  /** Clear all drag/button state. */
+  private fun resetDragState() {
+    activeDragState = null
+    dragGestureInProgress = false
+    mouseButtonDown = null
+  }
+
+  /**
    * Offsets for multi-touch fingers relative to the primary finger position.
    * Index 0 is always at (0, 0) - the primary finger.
    * Index 1 (2-finger touch): offset to the right by this amount
@@ -633,7 +659,7 @@ class GlobalInputService : AccessibilityService() {
                       ClipboardData.Format.Text -> {
                         log.debug { "SetClipboard: Text(${variant.data.size})" }
                         val text = String(variant.data, Charsets.UTF_8)
-                        ClipData.newPlainText("deskflow_clipboard", text)
+                        ClipData.newPlainText(INBOUND_CLIP_LABEL, text)
                       }
 
                       else -> {
@@ -907,6 +933,17 @@ class GlobalInputService : AccessibilityService() {
     // Broadcast that the service is disconnected
     sendServiceDisconnectionEvent<GlobalInputService>()
 
+    try {
+      clipboard.removePrimaryClipChangedListener(onClipboardChanged)
+    } catch (err: Exception) {
+      log.error(err) { "Error removing clipboard listener" }
+    }
+    if (::keyboardManager.isInitialized) {
+      keyboardManager.dispose()
+    }
+    resetDragState()
+    globalInputPending = false
+
     serviceScope.cancel()
     serviceClient.unbind()
     shizukuMouse.releaseAll()
@@ -1093,7 +1130,7 @@ class GlobalInputService : AccessibilityService() {
         .setDisplayId(activeDisplayId)
         .addStroke(StrokeDescription(path, 0, duration))
         .build()
-    dispatchGesture(gesture, gestureResultCallback, globalInputHandler)
+    safeDispatch(gesture, gestureResultCallback, globalInputHandler)
   }
 
   /**
@@ -1155,7 +1192,7 @@ class GlobalInputService : AccessibilityService() {
     )
     activeDragState = dragState
 
-    dispatchGesture(gesture, object : GestureResultCallback() {
+    safeDispatch(gesture, object : GestureResultCallback() {
       override fun onCompleted(gestureDescription: GestureDescription) {
         log.debug { "Speculative hold gesture dispatched successfully ($clampedFingerCount finger(s))" }
         dragGestureInProgress = false
@@ -1265,7 +1302,7 @@ class GlobalInputService : AccessibilityService() {
 
     val gesture = gestureBuilder.build()
 
-    dispatchGesture(gesture, object : GestureResultCallback() {
+    safeDispatch(gesture, object : GestureResultCallback() {
       override fun onCompleted(gestureDescription: GestureDescription) {
         log.debug { "Drag continuation completed" }
         dragGestureInProgress = false
@@ -1362,7 +1399,7 @@ class GlobalInputService : AccessibilityService() {
 
     val gesture = gestureBuilder.build()
 
-    dispatchGesture(gesture, object : GestureResultCallback() {
+    safeDispatch(gesture, object : GestureResultCallback() {
       override fun onCompleted(gestureDescription: GestureDescription) {
         log.debug { "Drag end gesture completed" }
         activeDragState = null
@@ -1490,6 +1527,13 @@ class GlobalInputService : AccessibilityService() {
       }
 
       MouseEvent.Type.Down -> {
+        // A second button pressed during an active drag must not overwrite the
+        // state of the button that armed the drag.
+        if (activeDragState != null) {
+          log.debug { "Ignoring button down id=${event.id} during active drag" }
+          return
+        }
+
         // Track button down state for drag detection
         mouseButtonDown = MouseButtonState(
           buttonId = event.id,
@@ -1526,6 +1570,11 @@ class GlobalInputService : AccessibilityService() {
 
         // Check if we have an active drag gesture
         val dragState = activeDragState
+        if (dragState != null && buttonState != null && buttonState.buttonId.toInt() != buttonId) {
+          // Chording: releasing a different button must not end the drag
+          log.debug { "Ignoring button up id=$buttonId during drag armed by id=${buttonState.buttonId}" }
+          return
+        }
         if (dragState != null) {
           // Check if this was a speculative hold that was never converted to drag
           if (dragState.initialHoldDuration == 0L) {
@@ -1704,7 +1753,7 @@ class GlobalInputService : AccessibilityService() {
 
     log.debug { "Spread gesture (zoom in) at [$pointerX, $pointerY]" }
 
-    dispatchGesture(gesture, object : GestureResultCallback() {
+    safeDispatch(gesture, object : GestureResultCallback() {
       override fun onCompleted(gestureDescription: GestureDescription) {
         log.debug { "Spread stroke completed, releasing with delay to stop gesture inertia" }
         // Release the spread gesture by continuing the existing strokes and lifting both fingers from their held positions.
@@ -1720,7 +1769,7 @@ class GlobalInputService : AccessibilityService() {
           .addStroke(lastStroke1)
           .addStroke(lastStroke2)
           .build()
-        dispatchGesture(releaseGesture, gestureResultCallback, globalInputHandler)
+        safeDispatch(releaseGesture, gestureResultCallback, globalInputHandler)
       }
 
       override fun onCancelled(gestureDescription: GestureDescription) {
@@ -1762,7 +1811,7 @@ class GlobalInputService : AccessibilityService() {
 
     log.debug { "Pinch gesture (zoom out) at [$pointerX, $pointerY]" }
 
-    dispatchGesture(gesture, object : GestureResultCallback() {
+    safeDispatch(gesture, object : GestureResultCallback() {
       override fun onCompleted(gestureDescription: GestureDescription) {
         log.debug { "Pinch stroke completed, releasing with delay to stop gesture inertia" }
         // Release the pinch gesture by continuing the existing strokes and lifting both fingers from their held positions.
@@ -1778,7 +1827,7 @@ class GlobalInputService : AccessibilityService() {
           .addStroke(lastStroke1)
           .addStroke(lastStroke2)
           .build()
-        dispatchGesture(releaseGesture, gestureResultCallback, globalInputHandler)
+        safeDispatch(releaseGesture, gestureResultCallback, globalInputHandler)
       }
 
       override fun onCancelled(gestureDescription: GestureDescription) {
@@ -1858,7 +1907,7 @@ class GlobalInputService : AccessibilityService() {
       "Scroll swipe: up=$up, homeScreen=$isHomeScreenActive, x=$swipeX, startY=$clampedStartY, endY=$clampedEndY, distance=${abs(clampedEndY - clampedStartY)}"
     }
 
-    dispatchGesture(gesture, gestureResultCallback, globalInputHandler)
+    safeDispatch(gesture, gestureResultCallback, globalInputHandler)
   }
 
   /**
@@ -2047,6 +2096,21 @@ class GlobalInputService : AccessibilityService() {
           log.debug { "onPrimaryClipChanged(clip=$clip)" }
           if (clip == null) return@catch
           val clipDesc = clip.description
+
+          // Don't echo a clip we just received from the server back to it
+          // (that would also steal clipboard ownership on the server).
+          if (clipDesc.label == INBOUND_CLIP_LABEL) {
+            log.debug { "ignoring clip set from server" }
+            return@catch
+          }
+
+          // Password managers / autofill mark their clips sensitive; never relay
+          // those to the server. ClipDescription.EXTRA_IS_SENSITIVE is API 33+,
+          // so use its value directly (minSdk is 31).
+          if (clipDesc.extras?.getBoolean(EXTRA_IS_SENSITIVE, false) == true) {
+            log.debug { "ignoring sensitive clip" }
+            return@catch
+          }
           val itemIdx =
             0.rangeUntil(clipDesc.mimeTypeCount).find { idx ->
               listOf(
@@ -2210,6 +2274,12 @@ class GlobalInputService : AccessibilityService() {
   // }
 
   companion object {
+    /** ClipData label for clips received from the server. */
+    private const val INBOUND_CLIP_LABEL = "deskflow_clipboard"
+
+    /** Value of ClipDescription.EXTRA_IS_SENSITIVE (API 33+). */
+    private const val EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"
+
     /** Pointer push-rate bounds; see [pointerApplyIntervalMs]. */
     private const val POINTER_MIN_HZ = 125
     private const val POINTER_MAX_HZ = 250
