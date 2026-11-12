@@ -108,7 +108,7 @@
 
     <!-- Shizuku virtual keyboard -->
     <string name="settings_shizuku_keyboard_label">Use Shizuku for keyboard input</string>
-    <string name="settings_shizuku_keyboard_description">Type on a virtual hardware keyboard instead of the Deskflow on-screen keyboard. Apps get real key presses and the on-screen keyboard stays hidden. Pick its layout under Settings → Physical keyboard → Deskflow Keyboard. If Escape acts as Back, turn off the system\'s Escape-as-Back option (on Lenovo: Physical keyboard → Keyboard assistance → Modifier keys). Requires Shizuku.</string>
+    <string name="settings_shizuku_keyboard_description">Type on a virtual hardware keyboard instead of the Deskflow on-screen keyboard. Apps get real key presses and the on-screen keyboard stays hidden. Pick its layout under Settings → Physical keyboard → Deskflow Keyboard. Requires Shizuku.</string>
     <string name="settings_shizuku_keyboard_status_not_running">Shizuku is not running. Using the Deskflow keyboard.</string>
     <string name="settings_shizuku_keyboard_status_permission_required">Shizuku permission needed. Using the Deskflow keyboard.</string>
     <string name="settings_shizuku_keyboard_status_waiting">Ready: the virtual keyboard is added when connected to a server.</string>

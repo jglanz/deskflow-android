@@ -28,6 +28,7 @@ package org.tfv.deskflow.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import androidx.annotation.VisibleForTesting
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
@@ -176,6 +177,11 @@ fun RootScreen(appState: IAppState) {
               .collectAsStateWithLifecycle()
 
           // REGULAR PERMISSIONS
+          //
+          // Both are API 33+. Below that the request resolves to "denied"
+          // instantly and would pin the user on an unsatisfiable dialog.
+          val needsApi33Permissions =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
           val notificationsPermissionState =
             rememberPermissionState(
               android.Manifest.permission.POST_NOTIFICATIONS
@@ -200,7 +206,9 @@ fun RootScreen(appState: IAppState) {
               text = R.string.permission_dialog_ime_enabled_message,
               onClick = { context.launchInputMethodServiceSettings() },
             )
-          } else if (!notificationsPermissionState.status.isGranted) {
+          } else if (
+            needsApi33Permissions && !notificationsPermissionState.status.isGranted
+          ) {
             PermissionsNeededDialog(
               text = R.string.permission_dialog_notifications_message,
               required = false,
@@ -208,7 +216,9 @@ fun RootScreen(appState: IAppState) {
                 notificationsPermissionState.launchPermissionRequest()
               },
             )
-          } else if (!nearbyDevicesPermissionState.status.isGranted) {
+          } else if (
+            needsApi33Permissions && !nearbyDevicesPermissionState.status.isGranted
+          ) {
             PermissionsNeededDialog(
               text = R.string.permission_dialog_nearby_devices_message,
               onClick = {

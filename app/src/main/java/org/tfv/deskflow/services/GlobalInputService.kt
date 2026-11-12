@@ -40,11 +40,13 @@ import android.content.pm.PackageManager
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.os.Build
 import android.hardware.display.DisplayManager
 import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
@@ -88,7 +90,7 @@ import org.tfv.deskflow.ext.sendServiceConnectionEvent
 import org.tfv.deskflow.ext.sendServiceDisconnectionEvent
 
 @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
-@SuppressLint("ServiceCast", "NewApi")
+@SuppressLint("ServiceCast")
 class GlobalInputService : AccessibilityService() {
 
   private var pickerShownForPackage: String? = null
@@ -207,6 +209,74 @@ class GlobalInputService : AccessibilityService() {
    * control the visibility of the mouse pointer view.
    */
   @Volatile private var mousePointerVisible = false
+
+  /** uptimeMillis of the last pointer layout push, for the update throttle. */
+  private var lastPointerApplyTime = 0L
+
+  /** Whether a trailing-edge pointer push is already queued. */
+  private var trailingApplyScheduled = false
+
+  /**
+   * Minimum interval between pointer window pushes, in ms.
+   *
+   * Only bounds the on-screen redraw: every event still updates
+   * [mousePointerLayout] x/y immediately, so clicks and gestures always use
+   * the freshest position. Derived from the display refresh rate, clamped to
+   * [POINTER_MIN_HZ, POINTER_MAX_HZ] -- pushing a bit faster than a 60Hz panel
+   * keeps the latched position fresher, while the cap bounds the relayout cost.
+   */
+  private val pointerApplyIntervalMs: Long by lazy {
+    val refreshHz =
+      runCatching {
+          getSystemService(DisplayManager::class.java)
+            .getDisplay(activeDisplayId)
+            ?.refreshRate
+        }
+        .getOrNull() ?: 60f
+    1000L / refreshHz.toInt().coerceIn(POINTER_MIN_HZ, POINTER_MAX_HZ)
+  }
+
+  private val trailingApplyRunnable = Runnable {
+    trailingApplyScheduled = false
+    lastPointerApplyTime = SystemClock.uptimeMillis()
+    applyPointerLayout()
+  }
+
+  /**
+   * Push the current pointer position to the window manager.
+   * [WindowManager.updateViewLayout] is a synchronous round trip to
+   * WindowManagerService that forces a relayout, so it is throttled through
+   * [schedulePointerApply] rather than run per incoming move.
+   */
+  private fun applyPointerLayout() {
+    if (!mousePointerVisible) return
+    try {
+      windowManager.updateViewLayout(mousePointerView, mousePointerLayout)
+    } catch (err: IllegalArgumentException) {
+      // View was detached between scheduling and running this push.
+      log.debug { "Pointer layout push skipped: ${err.message}" }
+    }
+  }
+
+  /**
+   * Throttle pointer pushes to [pointerApplyIntervalMs], leading + trailing
+   * edge: an isolated move applies immediately; during a burst the moves in
+   * between collapse into one trailing push carrying the newest position.
+   */
+  private fun schedulePointerApply() {
+    val now = SystemClock.uptimeMillis()
+    val elapsed = now - lastPointerApplyTime
+    if (elapsed >= pointerApplyIntervalMs) {
+      lastPointerApplyTime = now
+      applyPointerLayout()
+    } else if (!trailingApplyScheduled) {
+      trailingApplyScheduled = true
+      globalInputHandler.postDelayed(
+        trailingApplyRunnable,
+        pointerApplyIntervalMs - elapsed,
+      )
+    }
+  }
 
   /**
    * Flag to indicate if the accessibility service is fully connected and ready.
@@ -380,11 +450,14 @@ class GlobalInputService : AccessibilityService() {
     text: String,
     customizer: (NotificationCompat.Builder.() -> Unit)? = null,
   ) {
+    // POST_NOTIFICATIONS is a runtime permission only from API 33; below that
+    // checkSelfPermission reports it denied even though it isn't required.
     if (
-      ContextCompat.checkSelfPermission(
-        this,
-        Manifest.permission.POST_NOTIFICATIONS,
-      ) != PackageManager.PERMISSION_GRANTED
+      Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        ContextCompat.checkSelfPermission(
+          this,
+          Manifest.permission.POST_NOTIFICATIONS,
+        ) != PackageManager.PERMISSION_GRANTED
     ) {
       log.warn {
         "POST_NOTIFICATIONS permission not granted, cannot send notification."
@@ -412,13 +485,29 @@ class GlobalInputService : AccessibilityService() {
   }
 
   private fun isDeskflowKeyboardActive(
-    imeInfo: InputMethodInfo? = imeManager.currentInputMethodInfo
+    imeInfo: InputMethodInfo? = currentImeInfoCompat
   ): Boolean {
     return imeInfo?.let { current -> deskflowImeInfo?.id == current.id }
       ?: false
   }
 
-  @SuppressLint("NewApi")
+  /**
+   * The currently selected IME. [InputMethodManager.getCurrentInputMethodInfo]
+   * is API 34+; below that resolve it from Settings.Secure.DEFAULT_INPUT_METHOD,
+   * which holds the active IME's id.
+   */
+  private val currentImeInfoCompat: InputMethodInfo?
+    get() =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        imeManager.currentInputMethodInfo
+      } else {
+        android.provider.Settings.Secure.getString(
+            contentResolver,
+            android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
+          )
+          ?.let { id -> imeManager.inputMethodList.find { it.id == id } }
+      }
+
   private fun checkIMESetup() {
     val kbOpen = isKeyboardOpened
     val kbWasOpen = keyboardWasOpen.load()
@@ -435,7 +524,7 @@ class GlobalInputService : AccessibilityService() {
 
     keyboardWasOpen.store(true)
 
-    val imeInfo = imeManager.currentInputMethodInfo
+    val imeInfo = currentImeInfoCompat
     if (imeInfo != null) {
       log.debug { "Current IME: ${imeInfo.packageName}" }
       when {
@@ -1307,14 +1396,16 @@ class GlobalInputService : AccessibilityService() {
   private fun moveMousePointer(x: Int, y: Int) {
     if (!mousePointerVisible) return
 
-    val screenSize = getScreenSize(activeDisplayId)
+    // getScreenSize() queries window metrics; keep it inside the lazy log
+    // lambda so it only runs when debug logging is enabled.
     log.debug {
+      val screenSize = getScreenSize(activeDisplayId)
       "Cursor move to [${x}, ${y}] with size(${screenSize.px.width},${screenSize.px.height})"
     }
     mousePointerLayout.x = x
     mousePointerLayout.y = y
 
-    windowManager.updateViewLayout(mousePointerView, mousePointerLayout)
+    schedulePointerApply()
   }
 
   /**
@@ -2119,6 +2210,10 @@ class GlobalInputService : AccessibilityService() {
   // }
 
   companion object {
+    /** Pointer push-rate bounds; see [pointerApplyIntervalMs]. */
+    private const val POINTER_MIN_HZ = 125
+    private const val POINTER_MAX_HZ = 250
+
     private const val CHANNEL_ID = "deskflow_service_channel"
     private const val NOTIF_IME_NOT_SETUP_ID = 1
 

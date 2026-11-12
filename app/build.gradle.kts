@@ -61,7 +61,8 @@ android {
 
   defaultConfig {
     applicationId = "org.tfv.deskflow"
-    minSdk = 34
+    minSdk = 31
+    targetSdk = 34
 
     versionCode = projectVersionCode
     versionName = projectVersionName

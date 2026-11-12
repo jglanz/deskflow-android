@@ -119,7 +119,7 @@ There is no Play Store release. Build the APK yourself:
    ```bash
    ./gradlew installDebug
    ```
-3. Requires Android 14 (API 34) or newer.
+3. Requires Android 12 (API 31) or newer.
 
 ## Config
 

@@ -37,7 +37,7 @@ android {
   compileSdk = 36
 
   defaultConfig {
-    minSdk = 33
+    minSdk = 31
     version = "6.0.0.0"
     consumerProguardFiles.clear()
     consumerProguardFiles.add(File(projectDir, "consumer-proguard-rules.pro"))

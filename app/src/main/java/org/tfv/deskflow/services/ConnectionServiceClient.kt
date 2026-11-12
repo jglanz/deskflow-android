@@ -57,6 +57,7 @@ import org.tfv.deskflow.data.aidl.Result
 import org.tfv.deskflow.data.aidl.ScreenState
 import org.tfv.deskflow.data.aidl.ServerState
 import org.tfv.deskflow.ext.ConnectionStateDefaults
+import org.tfv.deskflow.ext.getSerializableCompat
 import org.tfv.deskflow.logging.LogRecordEvent
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -139,22 +140,22 @@ class ConnectionServiceClient(
         }
         val message = when (clazzName) {
           LogRecordEvent::class.java.name -> {
-            val logRecord = bundle.getSerializable("message", LogRecordEvent::class.java)!!
+            val logRecord = bundle.getSerializableCompat("message", LogRecordEvent::class.java)!!
             addLogRecord(logRecord)
 
             return
           }
 
           ScreenEvent.SetClipboard::class.java.name -> {
-            bundle.getSerializable("message", ScreenEvent.SetClipboard::class.java)
+            bundle.getSerializableCompat("message", ScreenEvent.SetClipboard::class.java)
           }
 
           KeyboardEvent::class.java.name -> {
-            bundle.getSerializable("message", KeyboardEvent::class.java)
+            bundle.getSerializableCompat("message", KeyboardEvent::class.java)
           }
 
           MouseEvent::class.java.name -> {
-            bundle.getSerializable("message", MouseEvent::class.java)
+            bundle.getSerializableCompat("message", MouseEvent::class.java)
           }
 
           else -> {
