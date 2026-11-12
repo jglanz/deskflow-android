@@ -42,7 +42,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.tfv.deskflow.BuildConfig
@@ -461,11 +460,9 @@ class ConnectionService : Service() {
       }
 
       override fun getState(): ConnectionState {
-        return runBlocking {
-          return@runBlocking connectionStateModel.state
-            .stateIn(serviceScope)
-            .value
-        }
+        // state is already a StateFlow; read it directly. stateIn(serviceScope)
+        // launched a new never-ending sharing coroutine on every call.
+        return connectionStateModel.state.value
       }
     }
 

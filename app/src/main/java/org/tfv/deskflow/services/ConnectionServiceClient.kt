@@ -220,8 +220,21 @@ class ConnectionServiceClient(
 
       val connectionService = connectionService
       if (connectionService != null) {
-        connectionService.unregisterCallback(connectionServiceCallback)
-        ctx.unbindService(serviceConnection)
+        try {
+          connectionService.unregisterCallback(connectionServiceCallback)
+        } catch (err: Exception) {
+          log.warn(err) { "unregisterCallback failed" }
+        }
+      }
+      // Gate on the bind request, not on connectionService: unbinding before
+      // onServiceConnected (or after onServiceDisconnected) must still release
+      // the ServiceConnection, otherwise it and its context leak.
+      if (isBound) {
+        try {
+          ctx.unbindService(serviceConnection)
+        } catch (err: IllegalArgumentException) {
+          log.warn(err) { "unbindService: not registered" }
+        }
       }
       this.connectionService = null
       isBoundStorage.store(false)

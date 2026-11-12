@@ -90,13 +90,8 @@ class AndroidForwardingLogger(override val name: String) : KLogger {
     }
 
     override fun isLoggingEnabledFor(level: Level, marker: Marker?): Boolean {
-        return when (level) {
-            Level.TRACE -> Log.isLoggable(name, Log.VERBOSE)
-            Level.DEBUG -> Log.isLoggable(name, Log.DEBUG)
-            Level.INFO -> Log.isLoggable(name, Log.INFO)
-            Level.WARN -> Log.isLoggable(name, Log.WARN)
-            Level.ERROR -> Log.isLoggable(name, Log.ERROR)
-            Level.OFF -> false
-        }
+        // Honor the user-selected level from the in-app selector. Log.isLoggable
+        // is false for DEBUG/VERBOSE by default, so Debug/Trace never logged.
+        return level != Level.OFF && level >= forwardingLevel
     }
 }
