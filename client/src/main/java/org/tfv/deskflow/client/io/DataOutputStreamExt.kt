@@ -34,8 +34,12 @@ private val log = KLoggingManager.logger("DataOutputStreamExt")
 
 @Throws(IOException::class)
 fun DataOutputStream.writeString(str: String) {
-    writeInt(str.length)
-    write(str.toByteArray(charset("UTF8")))
+    // Length prefix is a UTF-8 BYTE count (the wire format and our own readString
+    // both treat it as bytes). str.length is UTF-16 code units, which understates
+    // the payload for any non-ASCII char and desyncs the following frame.
+    val bytes = str.toByteArray(Charsets.UTF_8)
+    writeInt(bytes.size)
+    write(bytes)
 }
 
 fun DataOutputStream.writeMessage(message: Message) {

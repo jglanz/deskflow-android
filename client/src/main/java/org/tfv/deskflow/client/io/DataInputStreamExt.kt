@@ -26,18 +26,35 @@ package org.tfv.deskflow.client.io
 import java.io.DataInputStream
 import java.io.IOException
 
-@Throws(IOException::class)
-fun DataInputStream.readString(length: Int = 4): String {
+/** Max bytes accepted in a length-prefixed protocol string (screen names, etc.). */
+private const val MAX_STRING_BYTES = 16 * 1024
 
-    // Read in the bytes and convert to a string
+@Throws(IOException::class)
+fun DataInputStream.readString(): String {
+    // Faithful inverse of DataOutputStreamExt.writeString():
+    // 4-byte big-endian length prefix followed by exactly that many UTF-8 bytes.
+    val length = readInt()
+    // The server controls this value; cap it so a bogus length can't drive a
+    // multi-GB allocation (OutOfMemoryError) before readFully ever checks EOF.
+    require(length in 0..MAX_STRING_BYTES) {
+        "Protocol string length $length exceeds cap $MAX_STRING_BYTES"
+    }
     val stringBytes = ByteArray(length)
-    read(stringBytes, 0, stringBytes.size)
-    return String(stringBytes)
+    readFully(stringBytes)
+    return String(stringBytes, Charsets.UTF_8)
+}
+
+@Throws(IOException::class)
+fun DataInputStream.readFixedString(length: Int): String {
+    // Read a fixed number of bytes (no length prefix) and decode as UTF-8.
+    val stringBytes = ByteArray(length)
+    readFully(stringBytes)
+    return String(stringBytes, Charsets.UTF_8)
 }
 
 @Throws(IOException::class)
 fun DataInputStream.readExpectedString(expectedString: String): String {
-    val str = readString(expectedString.length)
+    val str = readFixedString(expectedString.length)
 
     require(str == expectedString) {
         "Expected string $expectedString not found.  Found: $str"

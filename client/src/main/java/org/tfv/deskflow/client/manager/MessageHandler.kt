@@ -51,7 +51,7 @@ class MessageHandler(
   var isScreenActive: Boolean = false
     private set
 
-  private var keepAliveServerTimestamp: Long = 0L
+  @Volatile private var keepAliveServerTimestamp: Long = 0L
   private var keepAliveFuture: ScheduledFuture<Void>? = null
 
   val screenName: String
@@ -90,16 +90,20 @@ class MessageHandler(
 
   /** Called on dispose to clean up resources. */
   override fun onDispose() {
-    synchronized(this) {
+    // Snapshot the executors under the lock, then shut them down outside it.
+    // Tasks running on these executors re-enter synchronized(this), so awaiting
+    // termination while holding the monitor would self-deadlock.
+    val executors = synchronized(this) {
       ClientEventBus.off(this::onClientEvent)
       cancelKeepAliveCheck(true)
       listOf(scheduledExecutor, messageExecutor)
-        .filter { !it.isShutdown }
-        .forEach {
-          it.shutdownNow()
-          it.awaitTermination(5, TimeUnit.SECONDS)
-        }
     }
+    executors
+      .filter { !it.isShutdown }
+      .forEach {
+        it.shutdownNow()
+        it.awaitTermination(5, TimeUnit.SECONDS)
+      }
   }
 
   private val isConnected: Boolean
@@ -123,7 +127,16 @@ class MessageHandler(
         log.warn { "Message executor is shutdown, ignoring messages" }
         return
       }
-      messageExecutor.submit { messages.forEach { message -> handle(message) } }
+      messageExecutor.submit {
+        messages.forEach { message ->
+          // One throwing handler must not drop the rest of the batch.
+          try {
+            handle(message)
+          } catch (err: Exception) {
+            log.error(err) { "Error handling message ${message.type}: ${err.message}" }
+          }
+        }
+      }
     }
   }
 

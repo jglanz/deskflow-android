@@ -338,6 +338,9 @@ class Client(
     val hadSocket = socket != null
     socket = disposeOf(socket)
     messageHandler = disposeOf(messageHandler)
+    // Drop any partially-read frame size so it can't mis-frame the next
+    // server's hello after a reconnect.
+    messageParser.reset()
 
     if (hadSocket) {
       ClientEventBus.emit(ConnectionEvent.Disconnected)
