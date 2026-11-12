@@ -11,7 +11,7 @@ secondary screen: mouse, keyboard and clipboard.
 > [jglanz/deskflow-android](https://github.com/jglanz/deskflow-android), which
 > is no longer active. It adds TLS client certificate support, much better
 > mouse handling, more keyboard keys, external display support, power and
-> connection fixes, and optional real mouse injection via Shizuku. See
+> connection fixes, and optional real mouse and keyboard input via Shizuku. See
 > [What's new in this fork](#whats-new-in-this-fork).
 
 ## Table of Contents
@@ -30,6 +30,7 @@ secondary screen: mouse, keyboard and clipboard.
       * [Keyboard (IME)](#keyboard-ime)
       * [Mouse](#mouse)
       * [Shizuku mouse injection (optional)](#shizuku-mouse-injection-optional)
+      * [Shizuku virtual keyboard (optional)](#shizuku-virtual-keyboard-optional)
       * [Start/Stop Connection](#startstop-connection)
 <!-- TOC -->
 
@@ -43,6 +44,9 @@ secondary screen: mouse, keyboard and clipboard.
   - Media keys: volume up/down, mute, play/pause, next/previous track
   - Works in terminal apps such as JuiceSSH (`Escape`, `PageUp`, `PageDown`,
     control characters, key repeat)
+  - Optional virtual hardware keyboard through
+    [Shizuku](https://shizuku.rikka.app/): real key presses, your physical
+    keyboard layout, and no on-screen keyboard
 - Mouse via an accessibility service with an on-screen pointer
   - Left/right/middle click, drag & drop, scrolling, `Ctrl` + wheel to zoom,
     side buttons for Back/Recents
@@ -84,6 +88,8 @@ secondary screen: mouse, keyboard and clipboard.
 - IME picker button on the keyboard status bar, and the picker is shown
   automatically when Deskflow disconnects
 - The Deskflow keyboard no longer overlaps input fields
+- Optional virtual hardware keyboard through Shizuku (see
+  [below](#shizuku-virtual-keyboard-optional))
 - Deskflow no longer forces its IME back once you have switched away while
   disconnected
 
@@ -181,6 +187,9 @@ itself back. Use the keyboard button on the Deskflow keyboard's status bar to
 open the input method picker. The picker also appears when Deskflow
 disconnects, so you can get back to your regular keyboard.
 
+If you have Shizuku, you can use a virtual hardware keyboard instead of the
+IME, see [below](#shizuku-virtual-keyboard-optional).
+
 #### Mouse
 
 By default, mouse input is turned into touch gestures through the
@@ -212,6 +221,29 @@ and mouse-style drag and text selection. Modifier keys are passed along too.
 If Shizuku isn't running or the permission is missing, the app falls back to
 touch gestures. The Deskflow pointer overlay is still drawn, and the side
 buttons still map to Back/Recents.
+
+#### Shizuku virtual keyboard (optional)
+
+With [Shizuku](https://shizuku.rikka.app/) running, the app can type server key
+presses on a virtual hardware keyboard (created through `/dev/uhid`) instead
+of committing text through the Deskflow IME. Android treats it as a real
+physical keyboard: apps get genuine key events, your chosen physical keyboard
+layout applies (including `AltGr` and dead keys), and the on-screen keyboard
+stays hidden.
+
+1. Install Shizuku and start it (via wireless debugging or ADB). Shizuku must
+   be started again after each reboot.
+2. In Deskflow settings, enable **Use Shizuku for keyboard input** and grant
+   the Shizuku permission when asked.
+3. The virtual keyboard is added while connected to a server. The status line
+   under the setting shows whether it is active.
+4. Pick its layout under Android **Settings → Physical keyboard → Deskflow
+   Keyboard** so it matches the layout used on your desktop.
+
+Characters the selected layout can't type fall back to the Deskflow IME. If
+Shizuku isn't running or the permission is missing, the Deskflow IME is used
+as usual. Global shortcuts (app switching etc.) still work, while `Escape` and
+the arrow keys are sent as real keys.
 
 #### Start/Stop Connection
 
